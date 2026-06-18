@@ -60,7 +60,6 @@ class MainDrivingNode(Node):
         self.traffic_light = TrafficLightDetector(show_debug=True)
 
         # Cone LiDAR driver
-        # 실제 라이다 주행 로직은 cone_lidar_driver.py에서 처리
         self.cone_driver = ConeLidarDriver(
             logger=self.get_logger(),
             show_debug=True
@@ -153,10 +152,10 @@ class MainDrivingNode(Node):
 
         # =====================================================
         # WAIT_TRAFFIC_LIGHT:
-        #   1. 처음 실행
-        #      - 앞 카메라 구독
-        #      - Traffic Light Detector 창 켜짐
-        #      - 라이다는 아직 구독하지 않음
+        #   - Camera is used first
+        #   - Show only Traffic Light Detector window
+        #   - Stop on RED
+        #   - Switch to GO on GREEN
         # =====================================================
         if self.mission_state == "WAIT_TRAFFIC_LIGHT":
             if not self.traffic_light.active:
@@ -172,11 +171,6 @@ class MainDrivingNode(Node):
                 self.drive(0, 0)
 
             elif state == "GO":
-                # =====================================================
-                # 2. 초록불 감지
-                #   - Traffic Light Detector 창 닫힘
-                #   - mission_state = CONE_DRIVE
-                # =====================================================
                 self.drive(0, 0)
 
                 self.traffic_light.disable()
@@ -188,11 +182,10 @@ class MainDrivingNode(Node):
 
         # =====================================================
         # CONE_DRIVE:
-        #   3. CONE_DRIVE 진입
-        #      - /scan 라이다 구독 시작
-        #      - 원래 LiDAR Debug Viewer 창 켜짐
-        #      - 기본 직진
-        #      - 가까운 장애물 있으면 정지
+        #   - LiDAR starts only after this state begins
+        #   - Original LiDAR Debug Viewer
+        #   - 기본 직진
+        #   - 정면 가까운 장애물만 정지
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
             self.start_lidar()
