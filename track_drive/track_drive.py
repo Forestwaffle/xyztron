@@ -25,7 +25,28 @@ class MainDrivingNode(Node):
         self.bridge = CvBridge()
         self.image = None
 
-        # Latest LiDAR data
+        self.motor_msg = XycarMotor()
+
+        self.qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE
+        )
+
+        # =====================================================
+        # Camera starts first.
+        # LiDAR is NOT subscribed here.
+        # =====================================================
+        self.camera_sub = self.create_subscription(
+            Image,
+            '/usb_cam/image_raw/front',
+            self.camera_callback,
+            self.qos
+        )
+
+        # LiDAR objects.
+        # They will be initialized only after CONE_DRIVE starts.
+        self.lidar_sub = None
+        self.lidar_started = False
         self.lidar_ranges = None
         self.lidar_data_received = False
 
@@ -36,29 +57,6 @@ class MainDrivingNode(Node):
         self.lidar_points = None
         self.lidar_log_counter = 0
         self.warned_no_lidar = False
-
-        self.motor_msg = XycarMotor()
-
-        qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE
-        )
-
-        # Front camera subscriber
-        self.camera_sub = self.create_subscription(
-            Image,
-            '/usb_cam/image_raw/front',
-            self.camera_callback,
-            qos
-        )
-
-        # LiDAR subscriber
-        self.lidar_sub = self.create_subscription(
-            LaserScan,
-            '/scan',
-            self.lidar_callback,
-            qos
-        )
 
         # Motor publisher
         self.motor_pub = self.create_publisher(
@@ -89,6 +87,21 @@ class MainDrivingNode(Node):
             )
         except Exception as e:
             self.get_logger().error(f"Camera conversion failed: {e}")
+
+    def start_lidar(self):
+        """Start LiDAR subscriber after mission state changes to CONE_DRIVE."""
+        if self.lidar_started:
+            return
+
+        self.lidar_sub = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.lidar_callback,
+            self.qos
+        )
+
+        self.lidar_started = True
+        self.get_logger().info("LiDAR subscriber started after CONE_DRIVE")
 
     def lidar_callback(self, msg):
         """Store latest LiDAR scan data."""
@@ -144,7 +157,7 @@ class MainDrivingNode(Node):
         if len(ranges) == 0:
             return
 
-        # Same coordinate assumption as lidar_viewer.py:
+        # Coordinate assumption:
         # index 0 = left, index 90 = front
         angles = np.deg2rad(np.arange(len(ranges)) - 90)
 
@@ -152,6 +165,7 @@ class MainDrivingNode(Node):
         y = -ranges * np.sin(angles)
 
         valid_mask = np.isfinite(x) & np.isfinite(y)
+
         valid_x = x[valid_mask]
         valid_y = y[valid_mask]
 
@@ -223,6 +237,7 @@ class MainDrivingNode(Node):
 
         # =====================================================
         # WAIT_TRAFFIC_LIGHT:
+        #   - Camera is used first
         #   - Show only Traffic Light Detector window
         #   - Stop on RED
         #   - Switch to GO on GREEN
@@ -254,11 +269,12 @@ class MainDrivingNode(Node):
 
         # =====================================================
         # CONE_DRIVE:
-        #   - Use LiDAR
+        #   - LiDAR starts only after this state begins
         #   - Show LiDAR debug viewer
         #   - Vehicle stays stopped for now
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
+            self.start_lidar()
             self.init_lidar_viewer()
             self.update_lidar_viewer()
 
