@@ -42,34 +42,25 @@ class MainDrivingNode(Node):
         )
 
         # =====================================================
-        # LiDAR objects.
-        # They will be initialized only after CONE_DRIVE starts.
+        # LiDAR starts only after CONE_DRIVE.
         # =====================================================
         self.lidar_sub = None
         self.lidar_started = False
         self.lidar_ranges = None
         self.lidar_data_received = False
 
-        # =====================================================
         # Motor publisher
-        # =====================================================
         self.motor_pub = self.create_publisher(
             XycarMotor,
             '/xycar_motor',
             10
         )
 
-        # =====================================================
         # Traffic light detector
-        # =====================================================
         self.traffic_light = TrafficLightDetector(show_debug=True)
 
-        # =====================================================
         # Cone LiDAR driver
-        #
-        # 이 파일에서 라이다 로직을 직접 만들지 않고,
-        # cone_lidar_driver.py의 ConeLidarDriver를 불러와서 사용.
-        # =====================================================
+        # 실제 라이다 주행 로직은 cone_lidar_driver.py에서 처리
         self.cone_driver = ConeLidarDriver(
             logger=self.get_logger(),
             show_debug=True
@@ -77,9 +68,7 @@ class MainDrivingNode(Node):
 
         self.cone_driver_started = False
 
-        # =====================================================
         # Mission state
-        # =====================================================
         self.mission_state = "WAIT_TRAFFIC_LIGHT"
 
         # Previous states for terminal logging
@@ -90,9 +79,7 @@ class MainDrivingNode(Node):
         self.timer = self.create_timer(0.05, self.control_loop)
 
     def camera_callback(self, msg):
-        """
-        Store latest front camera image.
-        """
+        """Store latest front camera image."""
         try:
             self.image = self.bridge.imgmsg_to_cv2(
                 msg,
@@ -102,9 +89,7 @@ class MainDrivingNode(Node):
             self.get_logger().error(f"Camera conversion failed: {e}")
 
     def start_lidar(self):
-        """
-        Start LiDAR subscriber after mission state changes to CONE_DRIVE.
-        """
+        """Start LiDAR subscriber after mission state changes to CONE_DRIVE."""
         if self.lidar_started:
             return
 
@@ -119,9 +104,7 @@ class MainDrivingNode(Node):
         self.get_logger().info("LiDAR subscriber started after CONE_DRIVE")
 
     def lidar_callback(self, msg):
-        """
-        Store latest LiDAR scan data.
-        """
+        """Store latest LiDAR scan data."""
         self.lidar_ranges = msg.ranges
 
         if not self.lidar_data_received:
@@ -131,17 +114,21 @@ class MainDrivingNode(Node):
             self.lidar_data_received = True
 
     def drive(self, angle, speed):
-        """
-        Publish motor command.
-        """
+        """Publish motor command."""
         self.motor_msg.angle = float(angle)
         self.motor_msg.speed = float(speed)
         self.motor_pub.publish(self.motor_msg)
 
+    def close_traffic_light_window(self):
+        """Close traffic light debug window safely."""
+        try:
+            cv2.destroyWindow("Traffic Light Detector")
+            cv2.waitKey(1)
+        except cv2.error:
+            pass
+
     def log_mission_state_changed(self):
-        """
-        Log mission state only when it changes.
-        """
+        """Log mission state only when it changes."""
         if self.mission_state != self.prev_mission_state:
             self.get_logger().info(
                 f"Mission state changed: {self.mission_state}"
@@ -149,9 +136,7 @@ class MainDrivingNode(Node):
             self.prev_mission_state = self.mission_state
 
     def log_traffic_light_state_changed(self, state):
-        """
-        Log traffic light state only when it changes.
-        """
+        """Log traffic light state only when it changes."""
         if state != self.prev_traffic_light_state:
             self.get_logger().info(
                 f"Traffic light state changed: {state}"
@@ -159,9 +144,7 @@ class MainDrivingNode(Node):
             self.prev_traffic_light_state = state
 
     def control_loop(self):
-        """
-        Main mission logic.
-        """
+        """Main mission logic."""
         if self.image is None:
             self.drive(0, 0)
             return
@@ -197,6 +180,7 @@ class MainDrivingNode(Node):
                 self.drive(0, 0)
 
                 self.traffic_light.disable()
+                self.close_traffic_light_window()
 
                 self.mission_state = "CONE_DRIVE"
 
@@ -206,9 +190,9 @@ class MainDrivingNode(Node):
         # CONE_DRIVE:
         #   3. CONE_DRIVE 진입
         #      - /scan 라이다 구독 시작
-        #      - cone_lidar_driver.py의 ConeLidarDriver 시작
-        #      - LiDAR Debug Viewer 창 켜짐
-        #      - 라이다 로직 실행
+        #      - 원래 LiDAR Debug Viewer 창 켜짐
+        #      - 기본 직진
+        #      - 가까운 장애물 있으면 정지
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
             self.start_lidar()
