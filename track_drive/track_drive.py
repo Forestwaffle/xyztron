@@ -46,8 +46,10 @@ class MainDrivingNode(Node):
         # =====================================================
         self.lidar_sub = None
         self.lidar_started = False
+        self.lidar_msg = None
         self.lidar_ranges = None
         self.lidar_data_received = False
+        self.lidar_callback_count = 0
 
         # Motor publisher
         self.motor_pub = self.create_publisher(
@@ -104,7 +106,9 @@ class MainDrivingNode(Node):
 
     def lidar_callback(self, msg):
         """Store latest LiDAR scan data."""
+        self.lidar_msg = msg
         self.lidar_ranges = msg.ranges
+        self.lidar_callback_count += 1
 
         if not self.lidar_data_received:
             self.get_logger().info(
@@ -184,9 +188,8 @@ class MainDrivingNode(Node):
         # CONE_DRIVE:
         #   - LiDAR starts only after this state begins
         #   - Original LiDAR Debug Viewer
-        #   - 기본 직진
-        #   - 전 방향 가까운 물체 감지 시 정지
-        #   - 가장 가까운 곳의 각도/거리/상태 INFO 출력
+        #   - Basic GO / STOP logic
+        #   - Print closest angle, distance, scan update info
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
             self.start_lidar()
@@ -195,7 +198,10 @@ class MainDrivingNode(Node):
                 self.cone_driver.start()
                 self.cone_driver_started = True
 
-            angle, speed = self.cone_driver.process(self.lidar_ranges)
+            angle, speed = self.cone_driver.process(
+                lidar_msg=self.lidar_msg,
+                callback_count=self.lidar_callback_count
+            )
 
             self.drive(angle, speed)
 
