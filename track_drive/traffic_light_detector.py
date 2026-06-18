@@ -1,296 +1,361 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import math
+import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 
 
-class ConeLidarDriver:
-    """
-    목표:
-        1. 일단 직진
-        2. 어느 이상 가까운 곳이 있으면 정지
+class TrafficLightDetector:
+    def __init__(self, show_debug=True):
+        # Detector activation flag
+        self.active = False
 
-    입력:
-        /scan LaserScan.ranges
+        # Current detector state
+        self.state = "STOP"
+        self.detected_light = "UNKNOWN"
 
-    처리:
-        정면 가까운 거리만 검사
-        가까우면 정지
-        아니면 직진
+        # Consecutive frame counters
+        self.red_count = 0
+        self.green_count = 0
 
-    출력:
-        angle:
-            기본 0.0
-
-        speed:
-            기본 직진: 5.0
-            정면 가까운 장애물: 0.0
-    """
-
-    def __init__(self, logger=None, show_debug=True):
-        self.logger = logger
+        # Debug display
         self.show_debug = show_debug
+        self.window_name = "Traffic Light Detector"
 
-        # =====================================================
-        # Simple drive parameters
-        # =====================================================
-        # 기본 직진 속도
-        self.forward_speed = 5.0
+        # Crop upper camera area
+        self.crop_y_ratio = 0.42
 
-        # 이 거리보다 가까운 물체가 정면에 있으면 정지
-        # 너무 빨리 멈추면 0.5
-        # 너무 늦게 멈추면 0.8
-        self.stop_distance = 0.6
+        # Color thresholds
+        self.red_threshold = 0.020
+        self.green_threshold = 0.030
 
-        # 정면만 좁게 검사
-        # 기존 lidar_viewer.py 기준:
-        #   ranges[85:95]를 전방 후보로 사용
-        self.front_index_min = 85
-        self.front_index_max = 95
+        # Consecutive frame confirmation
+        self.red_confirm_count = 2
+        self.green_confirm_count = 3
 
-        # 현재 출력값
-        self.angle = 0.0
-        self.speed = 0.0
+    def enable(self):
+        """Enable detector only once."""
+        if self.active:
+            return
 
-        # 현재 전방 최소 거리
-        self.front_min_distance = None
-        self.obstacle_detected = False
+        self.active = True
+        self.reset()
 
-        # =====================================================
-        # Original LiDAR viewer objects
-        # =====================================================
-        self.viewer_ready = False
-        self.fig = None
-        self.ax = None
-        self.lidar_points = None
+    def disable(self):
+        """Disable detector and close debug window."""
+        self.active = False
+        self.reset()
 
-        # Logging
-        self.warned_no_lidar = False
-        self.log_counter = 0
-
-    def start(self):
-        """
-        CONE_DRIVE 상태에 처음 들어왔을 때 한 번 호출.
-        """
         if self.show_debug:
-            self.init_lidar_viewer()
-
-        self.log_info("ConeLidarDriver started")
-
-    def stop(self):
-        """
-        종료 시 정지 및 디버그 창 닫기.
-        """
-        self.angle = 0.0
-        self.speed = 0.0
-
-        if self.viewer_ready:
             try:
-                plt.close(self.fig)
-            except Exception:
+                cv2.destroyWindow(self.window_name)
+                cv2.waitKey(1)
+            except cv2.error:
                 pass
 
-        self.viewer_ready = False
-        self.fig = None
-        self.ax = None
-        self.lidar_points = None
+    def reset(self):
+        """Reset detector state."""
+        self.state = "STOP"
+        self.detected_light = "UNKNOWN"
+        self.red_count = 0
+        self.green_count = 0
 
-        self.log_info("ConeLidarDriver stopped")
+    def is_go(self):
+        return self.state == "GO"
 
-    def process(self, lidar_ranges):
+    def is_stop(self):
+        return self.state == "STOP"
+
+    def process(self, frame):
         """
-        목표:
-            1. 일단 직진
-            2. 어느 이상 가까운 곳이 있으면 정지
+        Process one camera frame.
 
-        출력:
-            angle = 0.0
-            speed = 5.0 또는 0.0
+        Returns:
+            state: "STOP" or "GO"
+            detected_light: "RED", "GREEN", or "UNKNOWN"
+            debug_frame: cropped camera frame
         """
-        if lidar_ranges is None:
-            if not self.warned_no_lidar:
-                self.log_warn("No LiDAR data yet")
-                self.warned_no_lidar = True
+        if frame is None:
+            return self.state, self.detected_light, None
 
-            # LiDAR가 아직 안 들어온 순간만 안전 정지
-            self.angle = 0.0
-            self.speed = 0.0
-            self.print_debug()
-            return self.angle, self.speed
+        height, width = frame.shape[:2]
 
-        self.warned_no_lidar = False
+        # Crop upper area only
+        crop_y1 = 0
+        crop_y2 = int(height * self.crop_y_ratio)
+        crop_x1 = 0
+        crop_x2 = width
 
-        # 원래 LiDAR Viewer 방식으로 화면 업데이트
-        if self.show_debug:
-            self.update_lidar_viewer(lidar_ranges)
+        cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
 
-        # 기본값은 무조건 직진
-        self.angle = 0.0
-        self.speed = self.forward_speed
-        self.obstacle_detected = False
+        if not self.active:
+            return self.state, "DISABLED", cropped
 
-        # 정면 가까운 물체 확인
-        self.front_min_distance = self.get_front_min_distance(lidar_ranges)
+        traffic_box = self.find_black_traffic_box(cropped)
 
-        # 전방 거리값이 유효하고, stop_distance 이하일 때만 정지
-        if self.front_min_distance is not None:
-            if self.front_min_distance <= self.stop_distance:
-                self.obstacle_detected = True
-                self.angle = 0.0
-                self.speed = 0.0
+        self.detected_light = "UNKNOWN"
 
-        # front_min_distance가 None이면 장애물이 없는 것으로 보고 직진
-
-        self.print_debug()
-
-        return self.angle, self.speed
-
-    def get_front_min_distance(self, lidar_ranges):
-        """
-        전방 범위 안에서 가장 가까운 거리 반환.
-
-        기존 좌표 가정:
-            index 90 = 전방
-
-        검사 범위:
-            index 85~95
-        """
-        if lidar_ranges is None or len(lidar_ranges) == 0:
-            return None
-
-        max_index = len(lidar_ranges) - 1
-
-        start = max(0, self.front_index_min)
-        end = min(max_index, self.front_index_max)
-
-        front_candidates = [
-            d for d in lidar_ranges[start:end + 1]
-            if math.isfinite(d) and d > 0.0
-        ]
-
-        if not front_candidates:
-            return None
-
-        return min(front_candidates)
-
-    # =====================================================
-    # Original LiDAR Viewer
-    # =====================================================
-
-    def init_lidar_viewer(self):
-        """
-        원래 LiDAR Debug Viewer 형태로 생성.
-
-        형태:
-            - 고정 스케일 -10~10
-            - scatter 점 표시
-            - 차량 중심 빨간 점
-            - 전방 빨간 선
-        """
-        if self.viewer_ready:
-            return
-
-        self.fig, self.ax = plt.subplots(figsize=(8, 8))
-        self.ax.set_title("LiDAR Debug Viewer")
-        self.ax.set_aspect('equal')
-        self.ax.set_xlim(-10, 10)
-        self.ax.set_ylim(-10, 10)
-
-        # 원래 방식: scatter 하나만 사용
-        self.lidar_points = self.ax.scatter([], [], s=5)
-
-        # 차량 중심
-        self.ax.plot(0, 0, 'ro')
-
-        # 전방 방향 표시
-        self.ax.plot([0, 0], [0, 2], 'r-')
-
-        plt.ion()
-        plt.show(block=False)
-
-        self.viewer_ready = True
-        self.log_info("LiDAR debug viewer started")
-
-    def update_lidar_viewer(self, lidar_ranges):
-        """
-        기존 lidar_viewer.py 방식으로 LiDAR Viewer 업데이트.
-        """
-        if not self.viewer_ready:
-            self.init_lidar_viewer()
-
-        valid = np.array([
-            d if math.isfinite(d) else np.nan
-            for d in lidar_ranges
-        ], dtype=float)
-
-        if len(valid) == 0:
-            return
-
-        # 기존 viewer 방식:
-        # index 0 = left
-        # index 90 = front
-        angles = np.deg2rad(np.arange(len(valid)) - 90)
-
-        x = -valid * np.cos(angles)
-        y = -valid * np.sin(angles)
-
-        indices = np.arange(len(valid))
-        colors = np.full(len(valid), 'b', dtype=object)
-
-        # 원래 색상 구간
-        colors[(indices >= 0) & (indices < 45)] = 'r'
-        colors[(indices >= 45) & (indices < 90)] = 'g'
-        colors[(indices >= 90) & (indices < 270)] = 'b'
-        colors[(indices >= 270) & (indices < 315)] = 'orange'
-        colors[(indices >= 315) & (indices < 360)] = 'purple'
-
-        valid_mask = np.isfinite(x) & np.isfinite(y)
-
-        self.lidar_points.set_offsets(
-            np.c_[x[valid_mask], y[valid_mask]]
-        )
-
-        self.lidar_points.set_color(
-            colors[valid_mask]
-        )
-
-        self.fig.canvas.draw_idle()
-        self.fig.canvas.flush_events()
-
-    # =====================================================
-    # Debug log
-    # =====================================================
-
-    def print_debug(self):
-        """
-        약 1초마다 터미널 디버깅 출력.
-        """
-        self.log_counter += 1
-
-        if self.log_counter % 20 != 0:
-            return
-
-        if self.front_min_distance is None:
-            self.log_info(
-                "CONE LOG | front:invalid_or_clear "
-                f"| obstacle:{self.obstacle_detected} "
-                f"| angle:{self.angle:.2f} speed:{self.speed:.2f}"
+        if traffic_box is not None:
+            self.detected_light = self.analyze_red_green_inside_box(
+                cropped,
+                traffic_box
             )
-            return
+        else:
+            self.red_count = 0
+            self.green_count = 0
 
-        self.log_info(
-            f"CONE LOG | front_min:{self.front_min_distance:.2f} m "
-            f"| stop_distance:{self.stop_distance:.2f} m "
-            f"| obstacle:{self.obstacle_detected} "
-            f"| angle:{self.angle:.2f} speed:{self.speed:.2f}"
+        # Update counters
+        if self.detected_light == "RED":
+            self.red_count += 1
+            self.green_count = 0
+
+        elif self.detected_light == "GREEN":
+            self.green_count += 1
+            self.red_count = 0
+
+        else:
+            self.red_count = 0
+            self.green_count = 0
+
+        # Red priority
+        if self.red_count >= self.red_confirm_count:
+            self.state = "STOP"
+
+        if self.green_count >= self.green_confirm_count:
+            self.state = "GO"
+
+        self.draw_status(cropped, self.detected_light)
+
+        if self.show_debug:
+            cv2.imshow(self.window_name, cropped)
+            cv2.waitKey(1)
+
+        return self.state, self.detected_light, cropped
+
+    def find_black_traffic_box(self, image):
+        """Find the black rectangular traffic light box."""
+        height, width = image.shape[:2]
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Black / dark gray mask
+        black_mask = cv2.inRange(
+            hsv,
+            np.array([0, 0, 0]),
+            np.array([180, 130, 100])
         )
 
-    def log_info(self, msg):
-        if self.logger is not None:
-            self.logger.info(msg)
+        # Connect nearby dark regions and remove small noise
+        close_kernel = np.ones((11, 11), np.uint8)
+        open_kernel = np.ones((5, 5), np.uint8)
 
-    def log_warn(self, msg):
-        if self.logger is not None:
-            self.logger.warn(msg)
+        black_mask = cv2.morphologyEx(
+            black_mask,
+            cv2.MORPH_CLOSE,
+            close_kernel
+        )
+
+        black_mask = cv2.morphologyEx(
+            black_mask,
+            cv2.MORPH_OPEN,
+            open_kernel
+        )
+
+        contours, _ = cv2.findContours(
+            black_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        best_box = None
+        best_score = 0
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            if area < 700:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+
+            if w < 80 or h < 25:
+                continue
+
+            aspect_ratio = w / float(h)
+            rect_area = w * h
+            fill_ratio = area / float(rect_area)
+
+            # Traffic light box is a wide horizontal rectangle
+            if aspect_ratio < 1.7 or aspect_ratio > 6.0:
+                continue
+
+            # Reject sparse objects such as cables and poles
+            if fill_ratio < 0.25:
+                continue
+
+            center_y = y + h / 2.0
+
+            # Ignore objects too low in cropped image
+            if center_y > height * 0.85:
+                continue
+
+            score = area + rect_area
+
+            if score > best_score:
+                best_score = score
+                best_box = (x, y, w, h)
+
+        if best_box is not None:
+            x, y, w, h = best_box
+
+            cv2.rectangle(
+                image,
+                (x, y),
+                (x + w, y + h),
+                (255, 255, 0),
+                3
+            )
+
+            cv2.putText(
+                image,
+                "DETECTED BOX",
+                (x, max(y - 8, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),
+                2
+            )
+
+        return best_box
+
+    def analyze_red_green_inside_box(self, image, box):
+        """Check red and green pixel ratios inside the detected traffic light box."""
+        x, y, w, h = box
+
+        # Expand box slightly to include lamp edges
+        pad_x = int(w * 0.08)
+        pad_y = int(h * 0.12)
+
+        x1 = max(x - pad_x, 0)
+        y1 = max(y - pad_y, 0)
+        x2 = min(x + w + pad_x, image.shape[1])
+        y2 = min(y + h + pad_y, image.shape[0])
+
+        panel = image[y1:y2, x1:x2]
+
+        if panel.size == 0:
+            return "UNKNOWN"
+
+        hsv = cv2.cvtColor(panel, cv2.COLOR_BGR2HSV)
+
+        # Red HSV range
+        red_mask_1 = cv2.inRange(
+            hsv,
+            np.array([0, 100, 100]),
+            np.array([10, 255, 255])
+        )
+
+        red_mask_2 = cv2.inRange(
+            hsv,
+            np.array([170, 100, 100]),
+            np.array([180, 255, 255])
+        )
+
+        red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
+
+        # Green HSV range
+        green_mask = cv2.inRange(
+            hsv,
+            np.array([45, 120, 120]),
+            np.array([85, 255, 255])
+        )
+
+        red_pixels = cv2.countNonZero(red_mask)
+        green_pixels = cv2.countNonZero(green_mask)
+
+        total_pixels = panel.shape[0] * panel.shape[1]
+
+        red_ratio = red_pixels / float(total_pixels)
+        green_ratio = green_pixels / float(total_pixels)
+
+        # Draw analysis area
+        cv2.rectangle(
+            image,
+            (x1, y1),
+            (x2, y2),
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"R:{red_ratio:.3f}",
+            (x1, min(y2 + 25, image.shape[0] - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"G:{green_ratio:.3f}",
+            (x1 + 120, min(y2 + 25, image.shape[0] - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2
+        )
+
+        # Red priority
+        if red_ratio > self.red_threshold:
+            return "RED"
+
+        if green_ratio > self.green_threshold:
+            return "GREEN"
+
+        return "UNKNOWN"
+
+    def draw_status(self, image, detected_light):
+        """Draw detector state on image."""
+        state_color = (0, 255, 0) if self.state == "GO" else (0, 0, 255)
+
+        cv2.putText(
+            image,
+            f"STATE: {self.state}",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            state_color,
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"LIGHT: {detected_light}",
+            (20, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"ACTIVE: {self.active}",
+            (20, 105),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"R_CNT:{self.red_count} G_CNT:{self.green_count}",
+            (20, 135),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
