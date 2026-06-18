@@ -141,7 +141,7 @@ class MainDrivingNode(Node):
 
             # Temporary driving command after green light.
             # Change speed to 0 if you want to stop here.
-            self.drive(0, 5)
+            self.drive(0, 0)
 
         # =====================================================
         # Default safety stop
