@@ -185,7 +185,8 @@ class MainDrivingNode(Node):
         #   - LiDAR starts only after this state begins
         #   - Original LiDAR Debug Viewer
         #   - 기본 직진
-        #   - 정면 가까운 장애물만 정지
+        #   - 전 방향 가까운 물체 감지 시 정지
+        #   - 가장 가까운 곳의 각도/거리/상태 INFO 출력
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
             self.start_lidar()

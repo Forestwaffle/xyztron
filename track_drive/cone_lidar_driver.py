@@ -11,6 +11,7 @@ class ConeLidarDriver:
     목표:
         1. 일단 직진
         2. 전 방향 중 어느 곳이든 가까운 물체가 있으면 정지
+        3. 가장 가까운 곳의 각도와 거리, STOP/GO 상태를 INFO로 출력
 
     입력:
         /scan LaserScan.ranges
@@ -18,16 +19,17 @@ class ConeLidarDriver:
     처리:
         라이다 전체 ranges 확인
         유효한 거리값 중 최소 거리 계산
-        최소 거리가 stop_distance 이하이면 정지
-        아니면 직진
+        최소 거리의 index와 angle 계산
+        최소 거리가 stop_distance 이하이면 STOP
+        아니면 GO
 
     출력:
         angle:
             기본 0.0
 
         speed:
-            기본 직진: 5.0
-            가까운 장애물 감지: 0.0
+            GO: 5.0
+            STOP: 0.0
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -41,7 +43,7 @@ class ConeLidarDriver:
         self.forward_speed = 5.0
 
         # 전 방향에서 이 거리보다 가까운 물체가 있으면 정지
-        # 너무 빨리 멈추면 0.4~0.5
+        # 너무 자주 멈추면 0.4~0.5
         # 너무 늦게 멈추면 0.8~1.2
         self.stop_distance = 0.6
 
@@ -52,9 +54,16 @@ class ConeLidarDriver:
         self.angle = 0.0
         self.speed = 0.0
 
-        # 현재 전체 방향 최소 거리
-        self.all_direction_min_distance = None
-        self.all_direction_min_index = None
+        # 현재 상태
+        self.state = "STOP"
+
+        # 가장 가까운 점 정보
+        self.closest_distance = None
+        self.closest_index = None
+        self.closest_angle_deg = None
+        self.closest_direction = "UNKNOWN"
+
+        # 장애물 감지 여부
         self.obstacle_detected = False
 
         # =====================================================
@@ -84,6 +93,7 @@ class ConeLidarDriver:
         """
         self.angle = 0.0
         self.speed = 0.0
+        self.state = "STOP"
 
         if self.viewer_ready:
             try:
@@ -103,6 +113,7 @@ class ConeLidarDriver:
         목표:
             1. 일단 직진
             2. 전 방향 중 어느 곳이든 가까운 물체가 있으면 정지
+            3. 가장 가까운 곳의 각도와 거리, STOP/GO 상태를 INFO로 출력
 
         출력:
             angle = 0.0
@@ -113,9 +124,17 @@ class ConeLidarDriver:
                 self.log_warn("No LiDAR data yet")
                 self.warned_no_lidar = True
 
-            # LiDAR가 아직 안 들어온 순간만 안전 정지
+            # LiDAR가 아직 안 들어오면 안전 정지
             self.angle = 0.0
             self.speed = 0.0
+            self.state = "STOP"
+            self.obstacle_detected = True
+
+            self.closest_distance = None
+            self.closest_index = None
+            self.closest_angle_deg = None
+            self.closest_direction = "UNKNOWN"
+
             self.print_debug()
             return self.angle, self.speed
 
@@ -125,40 +144,71 @@ class ConeLidarDriver:
         if self.show_debug:
             self.update_lidar_viewer(lidar_ranges)
 
-        # 기본값은 직진
+        # 기본값은 GO 직진
         self.angle = 0.0
         self.speed = self.forward_speed
+        self.state = "GO"
         self.obstacle_detected = False
 
-        # 전 방향 가까운 물체 확인
+        # 전 방향에서 가장 가까운 점 계산
+        closest = self.get_closest_point_info(lidar_ranges)
+
+        if closest is None:
+            # 유효한 라이다 값이 없으면 일단 GO
+            # 완전 안전 정지를 원하면 여기 speed를 0.0으로 바꾸면 됨
+            self.closest_distance = None
+            self.closest_index = None
+            self.closest_angle_deg = None
+            self.closest_direction = "UNKNOWN"
+
+            self.state = "GO"
+            self.obstacle_detected = False
+            self.angle = 0.0
+            self.speed = self.forward_speed
+
+            self.print_debug()
+            return self.angle, self.speed
+
         (
-            self.all_direction_min_distance,
-            self.all_direction_min_index
-        ) = self.get_all_direction_min_distance(lidar_ranges)
+            self.closest_distance,
+            self.closest_index,
+            self.closest_angle_deg,
+            self.closest_direction
+        ) = closest
 
-        # 전체 방향에서 유효한 최소 거리값이 있고,
-        # 그 값이 stop_distance 이하이면 정지
-        if self.all_direction_min_distance is not None:
-            if self.all_direction_min_distance <= self.stop_distance:
-                self.obstacle_detected = True
-                self.angle = 0.0
-                self.speed = 0.0
-
-        # all_direction_min_distance가 None이면 감지값 없음으로 보고 직진
+        # 가까운 물체가 있으면 STOP
+        if self.closest_distance <= self.stop_distance:
+            self.state = "STOP"
+            self.obstacle_detected = True
+            self.angle = 0.0
+            self.speed = 0.0
+        else:
+            self.state = "GO"
+            self.obstacle_detected = False
+            self.angle = 0.0
+            self.speed = self.forward_speed
 
         self.print_debug()
 
         return self.angle, self.speed
 
-    def get_all_direction_min_distance(self, lidar_ranges):
+    def get_closest_point_info(self, lidar_ranges):
         """
-        라이다 전체 방향에서 가장 가까운 거리와 index 반환.
+        라이다 전체 방향에서 가장 가까운 거리, index, 각도, 방향 문자열 반환.
 
-        LaserScan miss 값인 inf/nan은 제외.
-        min_valid_distance 이하 값도 노이즈로 보고 제외.
+        angle 기준:
+            0도     = 전방
+            음수    = 왼쪽
+            양수    = 오른쪽
+            ±180도  = 후방 근처
+
+        기존 viewer 기준:
+            index 90 = 전방
+            index 0  = 왼쪽
+            index 180 = 오른쪽
         """
         if lidar_ranges is None or len(lidar_ranges) == 0:
-            return None, None
+            return None
 
         valid_candidates = []
 
@@ -172,11 +222,63 @@ class ConeLidarDriver:
             valid_candidates.append((distance, index))
 
         if not valid_candidates:
-            return None, None
+            return None
 
-        min_distance, min_index = min(valid_candidates, key=lambda item: item[0])
+        closest_distance, closest_index = min(
+            valid_candidates,
+            key=lambda item: item[0]
+        )
 
-        return min_distance, min_index
+        closest_angle_deg = self.index_to_angle_deg(closest_index)
+        closest_direction = self.angle_to_direction(closest_angle_deg)
+
+        return (
+            closest_distance,
+            closest_index,
+            closest_angle_deg,
+            closest_direction
+        )
+
+    def index_to_angle_deg(self, index):
+        """
+        라이다 index를 차량 기준 각도로 변환.
+
+        기존 사용 기준:
+            index 90 = 전방 0도
+
+        반환:
+            -180도 ~ +180도 범위
+            음수: 왼쪽
+            양수: 오른쪽
+        """
+        angle = float(index) - 90.0
+
+        # -180 ~ +180 범위로 정규화
+        while angle > 180.0:
+            angle -= 360.0
+
+        while angle < -180.0:
+            angle += 360.0
+
+        return angle
+
+    def angle_to_direction(self, angle_deg):
+        """
+        각도를 사람이 보기 쉬운 방향 문자열로 변환.
+        """
+        if angle_deg is None:
+            return "UNKNOWN"
+
+        if -30.0 <= angle_deg <= 30.0:
+            return "FRONT"
+
+        if 30.0 < angle_deg <= 150.0:
+            return "RIGHT"
+
+        if -150.0 <= angle_deg < -30.0:
+            return "LEFT"
+
+        return "BACK"
 
     # =====================================================
     # Original LiDAR Viewer
@@ -268,27 +370,38 @@ class ConeLidarDriver:
 
     def print_debug(self):
         """
-        약 1초마다 터미널 디버깅 출력.
+        약 1초마다 터미널 INFO 출력.
+
+        출력 예시:
+            LIDAR STATE:GO | closest_dist:1.25m | closest_angle:-42.00deg | direction:LEFT
+            LIDAR STATE:STOP | closest_dist:0.42m | closest_angle:18.00deg | direction:FRONT
         """
         self.log_counter += 1
 
+        # process()가 20Hz이므로 20번마다 1회 출력
         if self.log_counter % 20 != 0:
             return
 
-        if self.all_direction_min_distance is None:
+        if self.closest_distance is None:
             self.log_info(
-                "CONE LOG | all_min:invalid_or_clear "
+                f"LIDAR STATE:{self.state} "
+                f"| closest:invalid "
                 f"| obstacle:{self.obstacle_detected} "
-                f"| angle:{self.angle:.2f} speed:{self.speed:.2f}"
+                f"| angle_cmd:{self.angle:.2f} "
+                f"| speed_cmd:{self.speed:.2f}"
             )
             return
 
         self.log_info(
-            f"CONE LOG | all_min:{self.all_direction_min_distance:.2f} m "
-            f"| min_index:{self.all_direction_min_index} "
-            f"| stop_distance:{self.stop_distance:.2f} m "
+            f"LIDAR STATE:{self.state} "
+            f"| closest_dist:{self.closest_distance:.2f}m "
+            f"| closest_index:{self.closest_index} "
+            f"| closest_angle:{self.closest_angle_deg:.2f}deg "
+            f"| direction:{self.closest_direction} "
+            f"| stop_distance:{self.stop_distance:.2f}m "
             f"| obstacle:{self.obstacle_detected} "
-            f"| angle:{self.angle:.2f} speed:{self.speed:.2f}"
+            f"| angle_cmd:{self.angle:.2f} "
+            f"| speed_cmd:{self.speed:.2f}"
         )
 
     def log_info(self, msg):
