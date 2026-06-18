@@ -14,6 +14,7 @@ class ConeLidarDriver:
         3. 가장 가까운 거리가 stop_distance 이하이면 STOP
         4. 아니면 GO
         5. 가장 가까운 곳의 각도와 거리, STOP/GO 상태를 INFO로 출력
+        6. 가까운 값 여러 개를 INFO에 같이 출력
 
     입력:
         /scan LaserScan.ranges
@@ -39,6 +40,16 @@ class ConeLidarDriver:
         # 전 방향에서 이 거리보다 가까운 물체가 있으면 STOP
         self.stop_distance = 0.60
 
+        # INFO 출력 주기
+        # control_loop가 20Hz이므로:
+        #   20 = 약 1초마다 출력
+        #   10 = 약 0.5초마다 출력
+        #   5  = 약 0.25초마다 출력
+        self.log_interval_count = 5
+
+        # INFO에 표시할 가까운 값 개수
+        self.near_value_count = 5
+
         # =====================================================
         # Current output
         # =====================================================
@@ -53,6 +64,9 @@ class ConeLidarDriver:
         self.closest_index = None
         self.closest_angle_deg = None
         self.closest_direction = "UNKNOWN"
+
+        # 가까운 값 여러 개
+        self.near_points = []
 
         self.obstacle_detected = False
 
@@ -121,9 +135,12 @@ class ConeLidarDriver:
         if self.show_debug:
             self.update_lidar_viewer(lidar_ranges)
 
-        closest = self.get_closest_point_info(lidar_ranges)
+        self.near_points = self.get_near_points(
+            lidar_ranges,
+            count=self.near_value_count
+        )
 
-        if closest is None:
+        if len(self.near_points) == 0:
             self.clear_closest_info()
 
             # 라이다 값이 없으면 안전 정지
@@ -131,12 +148,12 @@ class ConeLidarDriver:
             self.print_debug()
             return self.angle, self.speed
 
-        (
-            self.closest_distance,
-            self.closest_index,
-            self.closest_angle_deg,
-            self.closest_direction
-        ) = closest
+        closest = self.near_points[0]
+
+        self.closest_distance = closest["distance"]
+        self.closest_index = closest["index"]
+        self.closest_angle_deg = closest["angle_deg"]
+        self.closest_direction = closest["direction"]
 
         if self.closest_distance <= self.stop_distance:
             self.set_stop_state()
@@ -164,18 +181,25 @@ class ConeLidarDriver:
         self.closest_index = None
         self.closest_angle_deg = None
         self.closest_direction = "UNKNOWN"
+        self.near_points = []
 
-    def get_closest_point_info(self, lidar_ranges):
+    def get_near_points(self, lidar_ranges, count=5):
         """
-        라이다 전체 방향에서 가장 가까운 거리, index, 각도, 방향 문자열 반환.
+        라이다 전체 방향에서 가까운 값 여러 개 반환.
 
-        기준:
-            index 90 = 전방 0도
-            index 0 = 왼쪽
-            index 180 = 오른쪽
+        반환 형식:
+            [
+                {
+                    "distance": 0.42,
+                    "index": 180,
+                    "angle_deg": 90.0,
+                    "direction": "RIGHT"
+                },
+                ...
+            ]
         """
         if lidar_ranges is None or len(lidar_ranges) == 0:
-            return None
+            return []
 
         valid_candidates = []
 
@@ -186,25 +210,24 @@ class ConeLidarDriver:
             if distance <= 0.0:
                 continue
 
-            valid_candidates.append((distance, index))
+            angle_deg = self.index_to_angle_deg(index)
+            direction = self.angle_to_direction(angle_deg)
 
-        if not valid_candidates:
-            return None
+            valid_candidates.append(
+                {
+                    "distance": float(distance),
+                    "index": int(index),
+                    "angle_deg": float(angle_deg),
+                    "direction": direction
+                }
+            )
 
-        closest_distance, closest_index = min(
-            valid_candidates,
-            key=lambda item: item[0]
-        )
+        if len(valid_candidates) == 0:
+            return []
 
-        closest_angle_deg = self.index_to_angle_deg(closest_index)
-        closest_direction = self.angle_to_direction(closest_angle_deg)
+        valid_candidates.sort(key=lambda item: item["distance"])
 
-        return (
-            closest_distance,
-            closest_index,
-            closest_angle_deg,
-            closest_direction
-        )
+        return valid_candidates[:count]
 
     def index_to_angle_deg(self, index):
         """
@@ -322,19 +345,48 @@ class ConeLidarDriver:
     # Debug log
     # =====================================================
 
+    def make_near_points_text(self):
+        """
+        INFO에 표시할 가까운 값 문자열 생성.
+        """
+        if len(self.near_points) == 0:
+            return "none"
+
+        texts = []
+
+        for number, point in enumerate(self.near_points, start=1):
+            text = (
+                f"#{number} "
+                f"i:{point['index']} "
+                f"d:{point['distance']:.2f}m "
+                f"a:{point['angle_deg']:.1f}deg "
+                f"{point['direction']}"
+            )
+
+            texts.append(text)
+
+        return " | ".join(texts)
+
     def print_debug(self):
         """
-        약 1초마다 터미널 INFO 출력.
+        터미널 INFO 출력.
+
+        기존보다 자주 출력:
+            log_interval_count = 5
+            20Hz 기준 약 0.25초마다 출력
         """
         self.log_counter += 1
 
-        if self.log_counter % 20 != 0:
+        if self.log_counter % self.log_interval_count != 0:
             return
+
+        near_values_text = self.make_near_points_text()
 
         if self.closest_distance is None:
             self.log_info(
                 f"LIDAR STATE:{self.state} "
                 f"| closest:invalid "
+                f"| near_values:[{near_values_text}] "
                 f"| obstacle:{self.obstacle_detected} "
                 f"| angle_cmd:{self.angle:.2f} "
                 f"| speed_cmd:{self.speed:.2f}"
@@ -348,6 +400,7 @@ class ConeLidarDriver:
             f"| closest_angle:{self.closest_angle_deg:.2f}deg "
             f"| direction:{self.closest_direction} "
             f"| stop_distance:{self.stop_distance:.2f}m "
+            f"| near_values:[{near_values_text}] "
             f"| obstacle:{self.obstacle_detected} "
             f"| angle_cmd:{self.angle:.2f} "
             f"| speed_cmd:{self.speed:.2f}"
