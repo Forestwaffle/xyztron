@@ -11,7 +11,7 @@ from cv_bridge import CvBridge
 
 from xycar_msgs.msg import XycarMotor
 from track_drive.traffic_light_detector import TrafficLightDetector
-from 123 123
+
 
 class MainDrivingNode(Node):
     def __init__(self):
