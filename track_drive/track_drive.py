@@ -46,10 +46,8 @@ class MainDrivingNode(Node):
         # =====================================================
         self.lidar_sub = None
         self.lidar_started = False
-        self.lidar_msg = None
         self.lidar_ranges = None
         self.lidar_data_received = False
-        self.lidar_callback_count = 0
 
         # Motor publisher
         self.motor_pub = self.create_publisher(
@@ -106,9 +104,7 @@ class MainDrivingNode(Node):
 
     def lidar_callback(self, msg):
         """Store latest LiDAR scan data."""
-        self.lidar_msg = msg
         self.lidar_ranges = msg.ranges
-        self.lidar_callback_count += 1
 
         if not self.lidar_data_received:
             self.get_logger().info(
@@ -118,9 +114,18 @@ class MainDrivingNode(Node):
 
     def drive(self, angle, speed):
         """Publish motor command."""
-        self.motor_msg.angle = float(angle)
-        self.motor_msg.speed = float(speed)
-        self.motor_pub.publish(self.motor_msg)
+        if not rclpy.ok():
+            return
+
+        try:
+            self.motor_msg.angle = float(angle)
+            self.motor_msg.speed = float(speed)
+            self.motor_pub.publish(self.motor_msg)
+        except Exception as e:
+            try:
+                self.get_logger().warn(f"Motor publish skipped: {e}")
+            except Exception:
+                pass
 
     def close_traffic_light_window(self):
         """Close traffic light debug window safely."""
@@ -189,7 +194,7 @@ class MainDrivingNode(Node):
         #   - LiDAR starts only after this state begins
         #   - Original LiDAR Debug Viewer
         #   - Basic GO / STOP logic
-        #   - Print closest angle, distance, scan update info
+        #   - Print closest angle, distance, state
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
             self.start_lidar()
@@ -198,10 +203,7 @@ class MainDrivingNode(Node):
                 self.cone_driver.start()
                 self.cone_driver_started = True
 
-            angle, speed = self.cone_driver.process(
-                lidar_msg=self.lidar_msg,
-                callback_count=self.lidar_callback_count
-            )
+            angle, speed = self.cone_driver.process(self.lidar_ranges)
 
             self.drive(angle, speed)
 
@@ -224,11 +226,32 @@ def main(args=None):
         pass
 
     finally:
-        node.drive(0, 0)
-        node.cone_driver.stop()
-        cv2.destroyAllWindows()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                node.drive(0, 0)
+        except Exception:
+            pass
+
+        try:
+            node.cone_driver.stop()
+        except Exception:
+            pass
+
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
