@@ -24,13 +24,12 @@ class MainDrivingNode(Node):
 
         self.motor_msg = XycarMotor()
 
-        # Unity simulator topics are usually RELIABLE
         qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE
         )
 
-        # Camera subscriber
+        # Front camera subscriber
         self.camera_sub = self.create_subscription(
             Image,
             '/usb_cam/image_raw/front',
@@ -45,16 +44,15 @@ class MainDrivingNode(Node):
             10
         )
 
-        # Traffic light detector
+        # Traffic light function class
         self.traffic_light = TrafficLightDetector(show_debug=True)
 
         # Mission state
         self.mission_state = "WAIT_TRAFFIC_LIGHT"
 
-        # Previous states for logging only when changed
-        self.prev_mission_state = None
+        # Previous states for terminal logging
         self.prev_traffic_light_state = None
-        self.prev_detected_light = None
+        self.prev_mission_state = None
 
         # Main loop: 20 Hz
         self.timer = self.create_timer(0.05, self.control_loop)
@@ -75,6 +73,37 @@ class MainDrivingNode(Node):
         self.motor_msg.speed = float(speed)
         self.motor_pub.publish(self.motor_msg)
 
+    def show_camera(self, text=""):
+        """Keep normal camera window updating after traffic light mission."""
+        if self.image is None:
+            return
+
+        frame = self.image.copy()
+
+        if text:
+            cv2.putText(
+                frame,
+                text,
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2
+            )
+
+        cv2.putText(
+            frame,
+            f"MISSION: {self.mission_state}",
+            (20, 85),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.imshow("Main Camera", frame)
+        cv2.waitKey(1)
+
     def log_mission_state_changed(self):
         """Log mission state only when it changes."""
         if self.mission_state != self.prev_mission_state:
@@ -83,17 +112,13 @@ class MainDrivingNode(Node):
             )
             self.prev_mission_state = self.mission_state
 
-    def log_traffic_light_changed(self, state, detected_light):
+    def log_traffic_light_state_changed(self, state):
         """Log traffic light state only when it changes."""
-        if (
-            state != self.prev_traffic_light_state
-            or detected_light != self.prev_detected_light
-        ):
+        if state != self.prev_traffic_light_state:
             self.get_logger().info(
-                f"Traffic light changed: state={state}, light={detected_light}"
+                f"Traffic light state changed: {state}"
             )
             self.prev_traffic_light_state = state
-            self.prev_detected_light = detected_light
 
     def control_loop(self):
         """Main mission logic."""
@@ -104,10 +129,9 @@ class MainDrivingNode(Node):
         self.log_mission_state_changed()
 
         # =====================================================
-        # Mission 1: Wait for green traffic light
+        # Mission 1: wait for green traffic light
         # =====================================================
         if self.mission_state == "WAIT_TRAFFIC_LIGHT":
-
             if not self.traffic_light.active:
                 self.traffic_light.enable()
 
@@ -115,7 +139,7 @@ class MainDrivingNode(Node):
                 self.image
             )
 
-            self.log_traffic_light_changed(state, detected_light)
+            self.log_traffic_light_state_changed(state)
 
             if state == "STOP":
                 self.drive(0, 0)
@@ -123,31 +147,26 @@ class MainDrivingNode(Node):
             elif state == "GO":
                 self.drive(0, 0)
 
-                # Disable traffic light detection,
-                # but the debug window will still keep updating.
                 self.traffic_light.disable()
-
                 self.mission_state = "CONE_DRIVE"
 
+                self.get_logger().info("Traffic light mission complete")
+
         # =====================================================
-        # Mission 2: Cone driving
+        # Mission 2: cone driving placeholder
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
-
-            # Important:
-            # Keep calling process() so the OpenCV debug window keeps updating.
-            # Since traffic_light is disabled, it only displays the camera crop.
-            self.traffic_light.process(self.image)
-
-            # Temporary driving command after green light.
-            # Change speed to 0 if you want to stop here.
+            # Keep camera window updating.
+            # Cone driving logic will be added here later.
             self.drive(0, 0)
+            self.show_camera("CONE_DRIVE MODE")
 
         # =====================================================
         # Default safety stop
         # =====================================================
         else:
             self.drive(0, 0)
+            self.show_camera("UNKNOWN MODE")
 
 
 def main(args=None):

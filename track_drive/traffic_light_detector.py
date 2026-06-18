@@ -10,7 +10,7 @@ class TrafficLightDetector:
         # Detector activation flag
         self.active = False
 
-        # Current result
+        # Current detector state
         self.state = "STOP"
         self.detected_light = "UNKNOWN"
 
@@ -18,17 +18,18 @@ class TrafficLightDetector:
         self.red_count = 0
         self.green_count = 0
 
-        # Debug option
+        # Debug display
         self.show_debug = show_debug
+        self.window_name = "Traffic Light Detector"
 
-        # Crop ratio for upper camera area
+        # Crop upper camera area
         self.crop_y_ratio = 0.42
 
         # Color thresholds
         self.red_threshold = 0.020
         self.green_threshold = 0.030
 
-        # Required consecutive frames
+        # Consecutive frame confirmation
         self.red_confirm_count = 2
         self.green_confirm_count = 3
 
@@ -41,23 +42,27 @@ class TrafficLightDetector:
         self.reset()
 
     def disable(self):
-        """Disable detector."""
+        """Disable detector and close its debug window."""
         self.active = False
         self.reset()
 
+        if self.show_debug:
+            try:
+                cv2.destroyWindow(self.window_name)
+            except cv2.error:
+                pass
+
     def reset(self):
-        """Reset internal state."""
+        """Reset detector state."""
         self.state = "STOP"
         self.detected_light = "UNKNOWN"
         self.red_count = 0
         self.green_count = 0
 
     def is_go(self):
-        """Return True if state is GO."""
         return self.state == "GO"
 
     def is_stop(self):
-        """Return True if state is STOP."""
         return self.state == "STOP"
 
     def process(self, frame):
@@ -74,6 +79,7 @@ class TrafficLightDetector:
 
         height, width = frame.shape[:2]
 
+        # Crop upper area only
         crop_y1 = 0
         crop_y2 = int(height * self.crop_y_ratio)
         crop_x1 = 0
@@ -81,16 +87,8 @@ class TrafficLightDetector:
 
         cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
 
-        # =====================================================
-        # Detector disabled:
-        # Do not analyze traffic light,
-        # but keep OpenCV debug window updating.
-        # =====================================================
         if not self.active:
-            if self.show_debug:
-                cv2.imshow("Traffic Light Detector", cropped)
-                cv2.waitKey(1)
-
+            self.draw_status(cropped, "DISABLED")
             return self.state, "DISABLED", cropped
 
         traffic_box = self.find_black_traffic_box(cropped)
@@ -106,6 +104,7 @@ class TrafficLightDetector:
             self.red_count = 0
             self.green_count = 0
 
+        # Update counters
         if self.detected_light == "RED":
             self.red_count += 1
             self.green_count = 0
@@ -118,16 +117,17 @@ class TrafficLightDetector:
             self.red_count = 0
             self.green_count = 0
 
-        # Red has priority
+        # Red priority
         if self.red_count >= self.red_confirm_count:
             self.state = "STOP"
 
         if self.green_count >= self.green_confirm_count:
             self.state = "GO"
 
-        # Show debug window
+        self.draw_status(cropped, self.detected_light)
+
         if self.show_debug:
-            cv2.imshow("Traffic Light Detector", cropped)
+            cv2.imshow(self.window_name, cropped)
             cv2.waitKey(1)
 
         return self.state, self.detected_light, cropped
@@ -138,12 +138,14 @@ class TrafficLightDetector:
 
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
+        # Black / dark gray mask
         black_mask = cv2.inRange(
             hsv,
             np.array([0, 0, 0]),
             np.array([180, 130, 100])
         )
 
+        # Connect nearby dark regions and remove small noise
         close_kernel = np.ones((11, 11), np.uint8)
         open_kernel = np.ones((5, 5), np.uint8)
 
@@ -183,14 +185,17 @@ class TrafficLightDetector:
             rect_area = w * h
             fill_ratio = area / float(rect_area)
 
+            # Traffic light box is a wide horizontal rectangle
             if aspect_ratio < 1.7 or aspect_ratio > 6.0:
                 continue
 
+            # Reject sparse shapes such as cables and poles
             if fill_ratio < 0.25:
                 continue
 
             center_y = y + h / 2.0
 
+            # Ignore objects too low in cropped image
             if center_y > height * 0.85:
                 continue
 
@@ -203,8 +208,6 @@ class TrafficLightDetector:
         if best_box is not None:
             x, y, w, h = best_box
 
-            # Draw detected traffic light box only.
-            # No text is drawn on the screen.
             cv2.rectangle(
                 image,
                 (x, y),
@@ -213,12 +216,23 @@ class TrafficLightDetector:
                 3
             )
 
+            cv2.putText(
+                image,
+                "DETECTED BOX",
+                (x, max(y - 8, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),
+                2
+            )
+
         return best_box
 
     def analyze_red_green_inside_box(self, image, box):
-        """Check red and green pixel ratios inside the detected box."""
+        """Check red and green pixel ratios inside the detected traffic light box."""
         x, y, w, h = box
 
+        # Expand box slightly to include lamp edges
         pad_x = int(w * 0.08)
         pad_y = int(h * 0.12)
 
@@ -234,6 +248,7 @@ class TrafficLightDetector:
 
         hsv = cv2.cvtColor(panel, cv2.COLOR_BGR2HSV)
 
+        # Red HSV range
         red_mask_1 = cv2.inRange(
             hsv,
             np.array([0, 100, 100]),
@@ -248,6 +263,7 @@ class TrafficLightDetector:
 
         red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
 
+        # Green HSV range
         green_mask = cv2.inRange(
             hsv,
             np.array([45, 120, 120]),
@@ -262,8 +278,7 @@ class TrafficLightDetector:
         red_ratio = red_pixels / float(total_pixels)
         green_ratio = green_pixels / float(total_pixels)
 
-        # Draw analysis area only.
-        # Removed R/G ratio text from the debug window.
+        # Draw analysis area
         cv2.rectangle(
             image,
             (x1, y1),
@@ -272,7 +287,27 @@ class TrafficLightDetector:
             2
         )
 
-        # Red priority rule
+        cv2.putText(
+            image,
+            f"R:{red_ratio:.3f}",
+            (x1, min(y2 + 25, image.shape[0] - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"G:{green_ratio:.3f}",
+            (x1 + 120, min(y2 + 25, image.shape[0] - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2
+        )
+
+        # Red priority
         if red_ratio > self.red_threshold:
             return "RED"
 
@@ -280,3 +315,47 @@ class TrafficLightDetector:
             return "GREEN"
 
         return "UNKNOWN"
+
+    def draw_status(self, image, detected_light):
+        """Draw detector state on image."""
+        state_color = (0, 255, 0) if self.state == "GO" else (0, 0, 255)
+
+        cv2.putText(
+            image,
+            f"STATE: {self.state}",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            state_color,
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"LIGHT: {detected_light}",
+            (20, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"ACTIVE: {self.active}",
+            (20, 105),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            image,
+            f"R_CNT:{self.red_count} G_CNT:{self.green_count}",
+            (20, 135),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
