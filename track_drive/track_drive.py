@@ -44,7 +44,7 @@ class MainDrivingNode(Node):
             10
         )
 
-        # Traffic light function class
+        # Traffic light detector
         self.traffic_light = TrafficLightDetector(show_debug=True)
 
         # Mission state
@@ -73,37 +73,6 @@ class MainDrivingNode(Node):
         self.motor_msg.speed = float(speed)
         self.motor_pub.publish(self.motor_msg)
 
-    def show_camera(self, text=""):
-        """Keep normal camera window updating after traffic light mission."""
-        if self.image is None:
-            return
-
-        frame = self.image.copy()
-
-        if text:
-            cv2.putText(
-                frame,
-                text,
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2
-            )
-
-        cv2.putText(
-            frame,
-            f"MISSION: {self.mission_state}",
-            (20, 85),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (255, 255, 255),
-            2
-        )
-
-        cv2.imshow("Main Camera", frame)
-        cv2.waitKey(1)
-
     def log_mission_state_changed(self):
         """Log mission state only when it changes."""
         if self.mission_state != self.prev_mission_state:
@@ -129,7 +98,10 @@ class MainDrivingNode(Node):
         self.log_mission_state_changed()
 
         # =====================================================
-        # Mission 1: wait for green traffic light
+        # WAIT_TRAFFIC_LIGHT:
+        #   - Show only Traffic Light Detector window
+        #   - Stop on RED
+        #   - Switch to GO on GREEN
         # =====================================================
         if self.mission_state == "WAIT_TRAFFIC_LIGHT":
             if not self.traffic_light.active:
@@ -145,28 +117,30 @@ class MainDrivingNode(Node):
                 self.drive(0, 0)
 
             elif state == "GO":
+                # Stop once before changing mission
                 self.drive(0, 0)
 
+                # Close Traffic Light Detector window
                 self.traffic_light.disable()
+
+                # Move to next mission
                 self.mission_state = "CONE_DRIVE"
 
                 self.get_logger().info("Traffic light mission complete")
 
         # =====================================================
-        # Mission 2: cone driving placeholder
+        # CONE_DRIVE:
+        #   - No camera window
+        #   - Vehicle stays stopped
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
-            # Keep camera window updating.
-            # Cone driving logic will be added here later.
             self.drive(0, 0)
-            self.show_camera("CONE_DRIVE MODE")
 
         # =====================================================
-        # Default safety stop
+        # Safety stop
         # =====================================================
         else:
             self.drive(0, 0)
-            self.show_camera("UNKNOWN MODE")
 
 
 def main(args=None):

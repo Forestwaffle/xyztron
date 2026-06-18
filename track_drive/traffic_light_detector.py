@@ -42,13 +42,14 @@ class TrafficLightDetector:
         self.reset()
 
     def disable(self):
-        """Disable detector and close its debug window."""
+        """Disable detector and close debug window."""
         self.active = False
         self.reset()
 
         if self.show_debug:
             try:
                 cv2.destroyWindow(self.window_name)
+                cv2.waitKey(1)
             except cv2.error:
                 pass
 
@@ -71,7 +72,7 @@ class TrafficLightDetector:
 
         Returns:
             state: "STOP" or "GO"
-            detected_light: "RED", "GREEN", "UNKNOWN", or "DISABLED"
+            detected_light: "RED", "GREEN", or "UNKNOWN"
             debug_frame: cropped camera frame
         """
         if frame is None:
@@ -88,7 +89,6 @@ class TrafficLightDetector:
         cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
 
         if not self.active:
-            self.draw_status(cropped, "DISABLED")
             return self.state, "DISABLED", cropped
 
         traffic_box = self.find_black_traffic_box(cropped)
@@ -189,7 +189,7 @@ class TrafficLightDetector:
             if aspect_ratio < 1.7 or aspect_ratio > 6.0:
                 continue
 
-            # Reject sparse shapes such as cables and poles
+            # Reject sparse objects such as cables and poles
             if fill_ratio < 0.25:
                 continue
 
