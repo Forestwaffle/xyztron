@@ -10,23 +10,27 @@ class ConeLidarDriver:
     """
     LiDAR Debug Viewer 기준 방향:
         index 0   = 정면
-        index 90  = 오른쪽
+        index 90  = 오른쪽/왼쪽 중 실제 뷰어 기준에 따라 확인 필요
         index 180 = 뒤쪽
-        index 270 = 왼쪽
+        index 270 = 반대쪽
 
     이번 로직:
-        정면 기준으로 좌/우 전방만 본다.
+        기존 코드에서 오른쪽/왼쪽 범위를 서로 바꿈.
 
-        left  : 300~359
-        right : 0~60
+        left  : 0~60
+        right : 300~359
 
-    판단:
-        left_median  < 10.00m 이면 STOP
-        right_median < 10.00m 이면 STOP
-        둘 다 10.00m 이상이면 GO
+    상태 로직:
+        GO 상태:
+            left_median < 10 또는 right_median < 10 이면
+            STOP이 아니라 TURN 상태로 전환
 
-    로그:
-        LiDAR MEDIAN | state:GO | stop_under:10.00m | right:... | left:...
+        TURN 상태:
+            왼쪽으로 핸들을 꺾고 전진
+            left_median > 40 이 되면 정지 상태로 전환
+
+        FINISH_STOP 상태:
+            차량 정지 유지
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -37,21 +41,29 @@ class ConeLidarDriver:
         # Drive parameters
         # =====================================================
         self.forward_speed = 5.0
+        self.turn_speed = 4.0
+
+        # 왼쪽 조향값
+        # 현재 가정:
+        #   음수 = 왼쪽 조향
+        # 만약 차량이 오른쪽으로 꺾이면 +40.0으로 바꾸면 됨.
+        self.left_turn_angle = -40.0
 
         # =====================================================
-        # Stop distance
-        # 10m 밑이면 정지
+        # Distance thresholds
         # =====================================================
-        self.stop_distance = 10.00
+        # GO -> TURN 전환 기준
+        self.turn_start_distance = 10.00
+
+        # TURN -> STOP 전환 기준
+        self.turn_finish_left_distance = 40.00
 
         # =====================================================
         # Sector ranges
         # =====================================================
-        # index 0 기준
-        # 왼쪽 전방: 300~359
-        # 오른쪽 전방: 0~60
-        self.left_indices = list(range(300, 360))     # 300~359
-        self.right_indices = list(range(0, 61))       # 0~60
+        # 오른쪽/왼쪽 범위 반대로 수정
+        self.left_indices = list(range(0, 61))        # 0~60
+        self.right_indices = list(range(300, 360))    # 300~359
 
         # =====================================================
         # Logging settings
@@ -67,7 +79,8 @@ class ConeLidarDriver:
         # =====================================================
         self.angle = 0.0
         self.speed = 0.0
-        self.state = "STOP"
+
+        self.state = "GO"
         self.decision = "INIT"
         self.obstacle_detected = False
 
@@ -100,7 +113,7 @@ class ConeLidarDriver:
     def stop(self):
         self.angle = 0.0
         self.speed = 0.0
-        self.state = "STOP"
+        self.state = "FINISH_STOP"
         self.decision = "STOP"
         self.obstacle_detected = True
 
@@ -124,7 +137,7 @@ class ConeLidarDriver:
                 self.warned_no_lidar = True
 
             self.clear_all_info()
-            self.set_stop_state("NO_LIDAR")
+            self.set_finish_stop_state("NO_LIDAR")
             self.print_debug()
             return self.angle, self.speed
 
@@ -147,20 +160,50 @@ class ConeLidarDriver:
         )
 
         # =====================================================
-        # 2. STOP / GO 판단
+        # 2. 상태 머신
         # =====================================================
-        stop_reasons = []
 
-        if self.left_median is not None and self.left_median < self.stop_distance:
-            stop_reasons.append("LEFT")
+        # -----------------------------------------------------
+        # GO 상태
+        # left 또는 right가 10m 밑이면 TURN으로 넘어감
+        # -----------------------------------------------------
+        if self.state == "GO":
+            turn_reasons = []
 
-        if self.right_median is not None and self.right_median < self.stop_distance:
-            stop_reasons.append("RIGHT")
+            if self.left_median is not None and self.left_median < self.turn_start_distance:
+                turn_reasons.append("LEFT")
 
-        if len(stop_reasons) > 0:
-            self.set_stop_state("STOP_BY_" + "_".join(stop_reasons))
+            if self.right_median is not None and self.right_median < self.turn_start_distance:
+                turn_reasons.append("RIGHT")
+
+            if len(turn_reasons) > 0:
+                self.set_turn_state("TURN_BY_" + "_".join(turn_reasons))
+            else:
+                self.set_go_state("GO_STRAIGHT")
+
+        # -----------------------------------------------------
+        # TURN 상태
+        # 왼쪽으로 꺾으면서 전진
+        # left_median이 40m 넘으면 정지
+        # -----------------------------------------------------
+        elif self.state == "TURN":
+            if self.left_median is not None and self.left_median > self.turn_finish_left_distance:
+                self.set_finish_stop_state("LEFT_OVER_40_STOP")
+            else:
+                self.set_turn_state("TURN_LEFT_UNTIL_LEFT_OVER_40")
+
+        # -----------------------------------------------------
+        # FINISH_STOP 상태
+        # 최종 정지 유지
+        # -----------------------------------------------------
+        elif self.state == "FINISH_STOP":
+            self.set_finish_stop_state("FINISH_STOP_KEEP")
+
+        # -----------------------------------------------------
+        # 알 수 없는 상태면 안전 정지
+        # -----------------------------------------------------
         else:
-            self.set_go_state("GO")
+            self.set_finish_stop_state("UNKNOWN_STATE_STOP")
 
         self.print_debug()
 
@@ -177,8 +220,15 @@ class ConeLidarDriver:
         self.angle = 0.0
         self.speed = self.forward_speed
 
-    def set_stop_state(self, decision):
-        self.state = "STOP"
+    def set_turn_state(self, decision):
+        self.state = "TURN"
+        self.decision = decision
+        self.obstacle_detected = True
+        self.angle = self.left_turn_angle
+        self.speed = self.turn_speed
+
+    def set_finish_stop_state(self, decision):
+        self.state = "FINISH_STOP"
         self.decision = decision
         self.obstacle_detected = True
         self.angle = 0.0
@@ -196,20 +246,6 @@ class ConeLidarDriver:
         self.right_count = 0
 
     def calculate_sector_median(self, lidar_ranges, indices):
-        """
-        특정 구간의 중앙값 계산.
-
-        제외:
-            - 특정 index 제외 없음
-            - 가까운 값 강제 제거 없음
-
-        단:
-            - inf
-            - nan
-            - 0 이하 값
-
-        위 값들은 중앙값 계산이 불가능하므로 제외.
-        """
         valid_values = []
 
         for index in indices:
@@ -275,9 +311,9 @@ class ConeLidarDriver:
 
         # 현재 LiDAR Debug Viewer 기준
         # index 0   -> 화면 위쪽, 정면
-        # index 90  -> 화면 오른쪽
+        # index 90  -> 화면 오른쪽/왼쪽 중 실제 방향 확인 필요
         # index 180 -> 화면 아래쪽
-        # index 270 -> 화면 왼쪽
+        # index 270 -> 반대쪽
         angles = np.deg2rad(np.arange(len(valid)) - 90)
 
         x = -valid * np.cos(angles)
@@ -287,11 +323,11 @@ class ConeLidarDriver:
 
         colors = np.full(len(valid), 'gray', dtype=object)
 
-        # 오른쪽 전방: 0~60
-        colors[(indices >= 0) & (indices <= 60)] = 'orange'
+        # left: 0~60
+        colors[(indices >= 0) & (indices <= 60)] = 'green'
 
-        # 왼쪽 전방: 300~359
-        colors[(indices >= 300) & (indices < 360)] = 'green'
+        # right: 300~359
+        colors[(indices >= 300) & (indices < 360)] = 'orange'
 
         # 기준 정면 index 0 근처 강조
         colors[(indices >= 350) & (indices < 360)] = 'red'
@@ -330,12 +366,14 @@ class ConeLidarDriver:
             return
 
         self.log_info(
-            f"LiDAR MEDIAN | "
+            f"LiDAR TURN | "
             f"state:{self.state} | "
             f"decision:{self.decision} | "
-            f"stop_under:{self.stop_distance:.2f}m | "
-            f"right:{self.format_distance(self.right_median)} | "
+            f"start_under:{self.turn_start_distance:.2f}m | "
+            f"finish_left_over:{self.turn_finish_left_distance:.2f}m | "
             f"left:{self.format_distance(self.left_median)} | "
+            f"right:{self.format_distance(self.right_median)} | "
+            f"angle:{self.angle:.2f} | "
             f"speed:{self.speed:.2f}"
         )
 
