@@ -11,10 +11,10 @@ class ConeLidarDriver:
     목표:
         1. 기본은 직진
         2. 전 방향 중 가장 가까운 물체를 찾음
-        3. 가장 가까운 거리가 stop_distance 이하이면 STOP
-        4. 아니면 GO
-        5. 가장 가까운 곳의 각도와 거리, STOP/GO 상태를 INFO로 출력
-        6. 가까운 값 여러 개를 INFO에 같이 출력
+        3. 단, 특정 index 범위는 무시
+        4. 가장 가까운 거리가 stop_distance 이하이면 STOP
+        5. 아니면 GO
+        6. 가까운 값 여러 개를 INFO에 출력
 
     입력:
         /scan LaserScan.ranges
@@ -40,11 +40,23 @@ class ConeLidarDriver:
         # 전 방향에서 이 거리보다 가까운 물체가 있으면 STOP
         self.stop_distance = 0.60
 
-        # INFO 출력 주기
+        # =====================================================
+        # Ignore index range
+        # =====================================================
+        # 로그에서 계속 0.12m로 잡히던 오른쪽 고정값 범위
+        # index 178~182 무시
+        self.ignore_index_ranges = [
+            (178, 182)
+        ]
+
+        # =====================================================
+        # INFO output parameters
+        # =====================================================
         # control_loop가 20Hz이므로:
         #   20 = 약 1초마다 출력
         #   10 = 약 0.5초마다 출력
         #   5  = 약 0.25초마다 출력
+        #   1  = 거의 매 루프 출력
         self.log_interval_count = 5
 
         # INFO에 표시할 가까운 값 개수
@@ -116,7 +128,8 @@ class ConeLidarDriver:
         """
         기본 로직:
             - 기본은 GO
-            - 라이다 전체 방향에서 가장 가까운 거리 계산
+            - 라이다 전체 방향에서 가까운 값 계산
+            - ignore_index_ranges에 들어간 index는 제외
             - closest_distance <= stop_distance 이면 STOP
             - 아니면 GO
         """
@@ -183,20 +196,21 @@ class ConeLidarDriver:
         self.closest_direction = "UNKNOWN"
         self.near_points = []
 
+    def is_ignored_index(self, index):
+        """
+        무시할 라이다 index인지 확인.
+        """
+        for start, end in self.ignore_index_ranges:
+            if start <= index <= end:
+                return True
+
+        return False
+
     def get_near_points(self, lidar_ranges, count=5):
         """
         라이다 전체 방향에서 가까운 값 여러 개 반환.
 
-        반환 형식:
-            [
-                {
-                    "distance": 0.42,
-                    "index": 180,
-                    "angle_deg": 90.0,
-                    "direction": "RIGHT"
-                },
-                ...
-            ]
+        단, ignore_index_ranges에 포함된 index는 제외한다.
         """
         if lidar_ranges is None or len(lidar_ranges) == 0:
             return []
@@ -204,6 +218,10 @@ class ConeLidarDriver:
         valid_candidates = []
 
         for index, distance in enumerate(lidar_ranges):
+            # 특정 index 범위 무시
+            if self.is_ignored_index(index):
+                continue
+
             if not math.isfinite(distance):
                 continue
 
@@ -345,6 +363,20 @@ class ConeLidarDriver:
     # Debug log
     # =====================================================
 
+    def make_ignore_ranges_text(self):
+        """
+        INFO에 표시할 무시 범위 문자열 생성.
+        """
+        if len(self.ignore_index_ranges) == 0:
+            return "none"
+
+        texts = []
+
+        for start, end in self.ignore_index_ranges:
+            texts.append(f"{start}~{end}")
+
+        return ", ".join(texts)
+
     def make_near_points_text(self):
         """
         INFO에 표시할 가까운 값 문자열 생성.
@@ -371,9 +403,8 @@ class ConeLidarDriver:
         """
         터미널 INFO 출력.
 
-        기존보다 자주 출력:
-            log_interval_count = 5
-            20Hz 기준 약 0.25초마다 출력
+        log_interval_count = 5이면
+        20Hz 기준 약 0.25초마다 출력.
         """
         self.log_counter += 1
 
@@ -381,11 +412,13 @@ class ConeLidarDriver:
             return
 
         near_values_text = self.make_near_points_text()
+        ignore_ranges_text = self.make_ignore_ranges_text()
 
         if self.closest_distance is None:
             self.log_info(
                 f"LIDAR STATE:{self.state} "
                 f"| closest:invalid "
+                f"| ignore_index:[{ignore_ranges_text}] "
                 f"| near_values:[{near_values_text}] "
                 f"| obstacle:{self.obstacle_detected} "
                 f"| angle_cmd:{self.angle:.2f} "
@@ -400,6 +433,7 @@ class ConeLidarDriver:
             f"| closest_angle:{self.closest_angle_deg:.2f}deg "
             f"| direction:{self.closest_direction} "
             f"| stop_distance:{self.stop_distance:.2f}m "
+            f"| ignore_index:[{ignore_ranges_text}] "
             f"| near_values:[{near_values_text}] "
             f"| obstacle:{self.obstacle_detected} "
             f"| angle_cmd:{self.angle:.2f} "
