@@ -18,11 +18,14 @@ class ConeLidarDriver:
         front : 60~119
         right : 120~180
 
-    로직:
+    현재 로직:
         1. 왼쪽 / 정면 / 오른쪽 중앙값 계산
-        2. 세 중앙값 중 하나라도 stop_median_distance 이하이면 STOP
-        3. 아니면 GO
-        4. 로그는 state, front, right, left 중앙값만 출력
+        2. 왼쪽, 오른쪽은 INFO 출력만 함
+        3. 정면 중앙값이 front_stop_distance 이하이면 STOP
+        4. 정면 중앙값이 front_stop_distance보다 크면 GO
+
+    정지 조건:
+        front_median <= 0.80m 이면 STOP
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -34,10 +37,8 @@ class ConeLidarDriver:
         # =====================================================
         self.forward_speed = 5.0
 
-        # 중앙값 정지 기준
-        # right_median이 0.14m 정도로 나오고 있었으므로,
-        # 0.10이면 GO, 0.15 이상이면 STOP 가능성이 큼.
-        self.stop_median_distance = 0.10
+        # 정면 중앙값 정지 기준
+        self.front_stop_distance = 0.80
 
         # =====================================================
         # Sector ranges
@@ -62,7 +63,6 @@ class ConeLidarDriver:
         self.speed = 0.0
         self.state = "STOP"
         self.decision = "INIT"
-        self.obstacle_detected = False
 
         # =====================================================
         # Median values
@@ -148,22 +148,16 @@ class ConeLidarDriver:
 
         # =====================================================
         # 2. STOP / GO 판단
+        # 정면 중앙값만 판단에 사용
         # =====================================================
-        stop_reasons = []
+        if self.front_median is None:
+            self.set_stop_state("FRONT_INVALID")
 
-        if self.left_median is not None and self.left_median <= self.stop_median_distance:
-            stop_reasons.append("LEFT")
+        elif self.front_median <= self.front_stop_distance:
+            self.set_stop_state("FRONT_STOP")
 
-        if self.front_median is not None and self.front_median <= self.stop_median_distance:
-            stop_reasons.append("FRONT")
-
-        if self.right_median is not None and self.right_median <= self.stop_median_distance:
-            stop_reasons.append("RIGHT")
-
-        if len(stop_reasons) > 0:
-            self.set_stop_state("STOP_BY_" + "_".join(stop_reasons))
         else:
-            self.set_go_state("GO")
+            self.set_go_state("FRONT_SAFE_GO")
 
         self.print_debug()
 
@@ -176,14 +170,12 @@ class ConeLidarDriver:
     def set_go_state(self, decision):
         self.state = "GO"
         self.decision = decision
-        self.obstacle_detected = False
         self.angle = 0.0
         self.speed = self.forward_speed
 
     def set_stop_state(self, decision):
         self.state = "STOP"
         self.decision = decision
-        self.obstacle_detected = True
         self.angle = 0.0
         self.speed = 0.0
 
@@ -209,7 +201,7 @@ class ConeLidarDriver:
             - 0.12m 고정값 제외 없음
             - 0.30m 이하 제거 없음
 
-        단, inf / nan / 0 이하 값은 계산 불가능하므로 제외.
+        단, inf / nan / 0 이하 값은 중앙값 계산이 불가능하므로 제외.
         """
         valid_values = []
 
@@ -322,7 +314,8 @@ class ConeLidarDriver:
             f"state:{self.state} | "
             f"front:{self.format_distance(self.front_median)} | "
             f"right:{self.format_distance(self.right_median)} | "
-            f"left:{self.format_distance(self.left_median)}"
+            f"left:{self.format_distance(self.left_median)} | "
+            f"front_stop:{self.front_stop_distance:.2f}m"
         )
 
     def log_info(self, msg):
