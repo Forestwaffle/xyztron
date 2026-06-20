@@ -58,7 +58,7 @@ class MainDrivingNode(Node):
 
         self.cone_driver = ConeLidarDriver(
             logger=self.get_logger(),
-            show_debug=True
+            show_debug=False
         )
 
         self.cone_driver_started = False

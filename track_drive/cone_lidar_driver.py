@@ -3,7 +3,6 @@
 
 import math
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 class ConeLidarDriver:
@@ -24,15 +23,20 @@ class ConeLidarDriver:
 
         TURN:
             왼쪽 최대 조향으로 전진
-            left 중앙값이 40m 넘으면 FINISH_STOP
+            left 중앙값이 53m 넘으면 FORWARD로 전환
 
-        FINISH_STOP:
-            정지 유지
+        FORWARD:
+            정지하지 않고 계속 직진
+
+    LiDAR debug viewer:
+        사용하지 않음
     """
 
-    def __init__(self, logger=None, show_debug=True):
+    def __init__(self, logger=None, show_debug=False):
         self.logger = logger
-        self.show_debug = show_debug
+
+        # 디버그 창 강제 비활성화
+        self.show_debug = False
 
         # =====================================================
         # Drive parameters
@@ -41,8 +45,7 @@ class ConeLidarDriver:
         self.turn_speed = 7.0
 
         # 왼쪽 최대 조향
-        # Xycar 기준 보통 -100 ~ 100
-        # 왼쪽으로 안 꺾이고 오른쪽으로 꺾이면 +100.0으로 변경
+        # 실제 차량이 반대로 꺾이면 +100.0으로 변경
         self.left_turn_angle = -100.0
 
         # =====================================================
@@ -51,8 +54,8 @@ class ConeLidarDriver:
         # GO -> TURN 전환 기준
         self.turn_start_distance = 10.00
 
-        # TURN -> FINISH_STOP 전환 기준
-        self.turn_finish_left_distance = 52.00
+        # TURN -> FORWARD 전환 기준
+        self.turn_finish_left_distance = 53.00
 
         # =====================================================
         # Sector ranges
@@ -63,8 +66,6 @@ class ConeLidarDriver:
         # =====================================================
         # Logging settings
         # =====================================================
-        # 1 = 매 제어 루프마다 출력
-        # track_drive.py timer를 0.02로 바꾸면 최대 50Hz 출력
         self.log_interval_count = 1
 
         # =====================================================
@@ -86,40 +87,18 @@ class ConeLidarDriver:
         self.left_count = 0
         self.right_count = 0
 
-        # =====================================================
-        # Viewer objects
-        # =====================================================
-        self.viewer_ready = False
-        self.fig = None
-        self.ax = None
-        self.lidar_points = None
-
         self.warned_no_lidar = False
         self.log_counter = 0
 
     def start(self):
-        if self.show_debug:
-            self.init_lidar_viewer()
-
-        self.log_info("ConeLidarDriver started")
+        self.log_info("ConeLidarDriver started without LiDAR debug viewer")
 
     def stop(self):
         self.angle = 0.0
         self.speed = 0.0
-        self.state = "FINISH_STOP"
+        self.state = "STOP"
         self.decision = "STOP"
         self.obstacle_detected = True
-
-        if self.viewer_ready:
-            try:
-                plt.close(self.fig)
-            except Exception:
-                pass
-
-        self.viewer_ready = False
-        self.fig = None
-        self.ax = None
-        self.lidar_points = None
 
         self.log_info("ConeLidarDriver stopped")
 
@@ -130,14 +109,11 @@ class ConeLidarDriver:
                 self.warned_no_lidar = True
 
             self.clear_all_info()
-            self.set_finish_stop_state("NO_LIDAR")
+            self.set_stop_state("NO_LIDAR")
             self.print_debug()
             return self.angle, self.speed
 
         self.warned_no_lidar = False
-
-        if self.show_debug:
-            self.update_lidar_viewer(lidar_ranges)
 
         # =====================================================
         # 1. 왼쪽 / 오른쪽 중앙값 계산
@@ -172,15 +148,15 @@ class ConeLidarDriver:
 
         elif self.state == "TURN":
             if self.left_median is not None and self.left_median > self.turn_finish_left_distance:
-                self.set_finish_stop_state("LEFT_OVER_40_STOP")
+                self.set_forward_state("LEFT_OVER_53_FORWARD")
             else:
                 self.set_turn_state("TURN_LEFT_MAX")
 
-        elif self.state == "FINISH_STOP":
-            self.set_finish_stop_state("FINISH_STOP_KEEP")
+        elif self.state == "FORWARD":
+            self.set_forward_state("FORWARD_KEEP")
 
         else:
-            self.set_finish_stop_state("UNKNOWN_STATE_STOP")
+            self.set_stop_state("UNKNOWN_STATE_STOP")
 
         self.print_debug()
 
@@ -204,8 +180,15 @@ class ConeLidarDriver:
         self.angle = self.left_turn_angle
         self.speed = self.turn_speed
 
-    def set_finish_stop_state(self, decision):
-        self.state = "FINISH_STOP"
+    def set_forward_state(self, decision):
+        self.state = "FORWARD"
+        self.decision = decision
+        self.obstacle_detected = False
+        self.angle = 0.0
+        self.speed = self.forward_speed
+
+    def set_stop_state(self, decision):
+        self.state = "STOP"
         self.decision = decision
         self.obstacle_detected = True
         self.angle = 0.0
@@ -245,81 +228,6 @@ class ConeLidarDriver:
         median_value = float(np.median(valid_values))
 
         return median_value, len(valid_values)
-
-    # =====================================================
-    # LiDAR viewer
-    # =====================================================
-
-    def init_lidar_viewer(self):
-        if self.viewer_ready:
-            return
-
-        self.fig, self.ax = plt.subplots(figsize=(8, 8))
-        self.ax.set_title("LiDAR Debug Viewer")
-        self.ax.set_aspect('equal')
-        self.ax.set_xlim(-10, 10)
-        self.ax.set_ylim(-10, 10)
-
-        self.lidar_points = self.ax.scatter([], [], s=5)
-
-        # 차량 중심
-        self.ax.plot(0, 0, 'ro')
-
-        # 전방 방향 표시
-        self.ax.plot([0, 0], [0, 2], 'r-')
-
-        plt.ion()
-        plt.show(block=False)
-
-        self.viewer_ready = True
-        self.log_info("LiDAR debug viewer started")
-
-    def update_lidar_viewer(self, lidar_ranges):
-        if not self.viewer_ready:
-            self.init_lidar_viewer()
-
-        valid = np.array([
-            d if math.isfinite(d) else np.nan
-            for d in lidar_ranges
-        ], dtype=float)
-
-        if len(valid) == 0:
-            return
-
-        angles = np.deg2rad(np.arange(len(valid)) - 90)
-
-        x = -valid * np.cos(angles)
-        y = -valid * np.sin(angles)
-
-        indices = np.arange(len(valid))
-
-        colors = np.full(len(valid), 'gray', dtype=object)
-
-        # left: 0~60
-        colors[(indices >= 0) & (indices <= 60)] = 'green'
-
-        # right: 300~359
-        colors[(indices >= 300) & (indices < 360)] = 'orange'
-
-        # 정면 index 0 근처 강조
-        colors[(indices >= 350) & (indices < 360)] = 'red'
-        colors[(indices >= 0) & (indices <= 10)] = 'red'
-
-        # 뒤쪽 참고
-        colors[(indices >= 150) & (indices <= 210)] = 'blue'
-
-        valid_mask = np.isfinite(x) & np.isfinite(y)
-
-        self.lidar_points.set_offsets(
-            np.c_[x[valid_mask], y[valid_mask]]
-        )
-
-        self.lidar_points.set_color(
-            colors[valid_mask]
-        )
-
-        self.fig.canvas.draw_idle()
-        self.fig.canvas.flush_events()
 
     # =====================================================
     # Debug log
