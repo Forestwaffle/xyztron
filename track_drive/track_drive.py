@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import math
+import cv2
 import rclpy
 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Image, LaserScan
+from cv_bridge import CvBridge
 
 from xycar_msgs.msg import XycarMotor
+from track_drive.traffic_light_detector import TrafficLightDetector
+from track_drive.cone_lidar_driver import ConeLidarDriver
 
 
 class MainDrivingNode(Node):
@@ -16,22 +19,24 @@ class MainDrivingNode(Node):
         super().__init__('main_driving_node')
 
         self.get_logger().info("Main driving node started")
-        self.get_logger().info("Mode: LiDAR INFO ONLY")
-        self.get_logger().info("LiDAR log range: index 80~100")
 
-        # =====================================================
-        # QoS
-        # Unity / ROS-TCP 쪽은 RELIABLE 사용
-        # =====================================================
+        self.bridge = CvBridge()
+        self.image = None
+
+        self.motor_msg = XycarMotor()
+
         self.qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE
         )
 
-        # =====================================================
-        # LiDAR subscriber
-        # 프로그램 시작하자마자 /scan 구독
-        # =====================================================
+        self.camera_sub = self.create_subscription(
+            Image,
+            '/usb_cam/image_raw/front',
+            self.camera_callback,
+            self.qos
+        )
+
         self.lidar_sub = self.create_subscription(
             LaserScan,
             '/scan',
@@ -39,11 +44,9 @@ class MainDrivingNode(Node):
             self.qos
         )
 
-        # =====================================================
-        # Motor publisher
-        # 현재는 INFO 확인용이므로 계속 정지
-        # =====================================================
-        self.motor_msg = XycarMotor()
+        self.lidar_ranges = None
+        self.lidar_data_received = False
+        self.lidar_callback_count = 0
 
         self.motor_pub = self.create_publisher(
             XycarMotor,
@@ -51,42 +54,32 @@ class MainDrivingNode(Node):
             10
         )
 
-        # =====================================================
-        # LiDAR data
-        # =====================================================
-        self.lidar_ranges = None
-        self.lidar_data_received = False
-        self.lidar_callback_count = 0
+        self.traffic_light = TrafficLightDetector(show_debug=True)
 
-        # =====================================================
-        # Log range
-        # 이전과 동일하게 80~100만 출력
-        # =====================================================
-        self.log_index_min = 80
-        self.log_index_max = 100
-
-        # INFO 출력 주기
-        # 0.25초마다 한 번 출력
-        self.log_interval_sec = 1
-
-        # 정지 명령 주기
-        # 20Hz
-        self.control_timer = self.create_timer(
-            0.05,
-            self.control_loop
+        self.cone_driver = ConeLidarDriver(
+            logger=self.get_logger(),
+            show_debug=True
         )
 
-        # 라이다 INFO 출력 주기
-        self.info_timer = self.create_timer(
-            self.log_interval_sec,
-            self.print_lidar_info
-        )
+        self.cone_driver_started = False
+
+        self.mission_state = "WAIT_TRAFFIC_LIGHT"
+
+        self.prev_traffic_light_state = None
+        self.prev_mission_state = None
+
+        self.timer = self.create_timer(0.05, self.control_loop)
+
+    def camera_callback(self, msg):
+        try:
+            self.image = self.bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding='bgr8'
+            )
+        except Exception as e:
+            self.get_logger().error(f"Camera conversion failed: {e}")
 
     def lidar_callback(self, msg):
-        """
-        /scan 콜백.
-        라이다 전체 360개 값을 계속 최신값으로 저장.
-        """
         self.lidar_ranges = msg.ranges
         self.lidar_callback_count += 1
 
@@ -96,17 +89,13 @@ class MainDrivingNode(Node):
             )
             self.lidar_data_received = True
 
-    def control_loop(self):
-        """
-        현재는 라이다 확인용.
-        차량은 계속 정지.
-        """
-        self.drive(0.0, 0.0)
+        if self.lidar_callback_count % 20 == 0:
+            self.get_logger().info(
+                f"LiDAR update #{self.lidar_callback_count} "
+                f"| beams:{len(msg.ranges)}"
+            )
 
     def drive(self, angle, speed):
-        """
-        Motor command publish.
-        """
         if not rclpy.ok():
             return
 
@@ -120,145 +109,68 @@ class MainDrivingNode(Node):
             except Exception:
                 pass
 
-    def print_lidar_info(self):
-        """
-        index 80~100 라이다 값만 INFO로 출력.
-        """
-        if self.lidar_ranges is None:
-            self.get_logger().info("LiDAR INFO | no data yet")
-            return
+    def close_traffic_light_window(self):
+        try:
+            cv2.destroyWindow("Traffic Light Detector")
+            cv2.waitKey(1)
+        except cv2.error:
+            pass
 
-        total_beams = len(self.lidar_ranges)
-
-        start_index = max(0, self.log_index_min)
-        end_index = min(total_beams - 1, self.log_index_max)
-
-        raw_values_text = self.make_range_values_text(
-            self.lidar_ranges,
-            start_index,
-            end_index
-        )
-
-        closest = self.get_closest_in_range(
-            self.lidar_ranges,
-            start_index,
-            end_index
-        )
-
-        if closest is None:
+    def log_mission_state_changed(self):
+        if self.mission_state != self.prev_mission_state:
             self.get_logger().info(
-                f"LiDAR INFO "
-                f"| cb:{self.lidar_callback_count} "
-                f"| beams:{total_beams} "
-                f"| range:[{start_index}~{end_index}] "
-                f"| closest:invalid "
-                f"| values:[{raw_values_text}]"
+                f"Mission state changed: {self.mission_state}"
             )
-            return
+            self.prev_mission_state = self.mission_state
 
-        closest_distance = closest["distance"]
-        closest_index = closest["index"]
-        closest_angle = closest["angle_deg"]
-        closest_direction = closest["direction"]
+    def log_traffic_light_state_changed(self, state):
+        if state != self.prev_traffic_light_state:
+            self.get_logger().info(
+                f"Traffic light state changed: {state}"
+            )
+            self.prev_traffic_light_state = state
 
-        self.get_logger().info(
-            f"LiDAR INFO "
-            f"| cb:{self.lidar_callback_count} "
-            f"| beams:{total_beams} "
-            f"| range:[{start_index}~{end_index}] "
-            f"| closest_dist:{closest_distance:.2f}m "
-            f"| closest_index:{closest_index} "
-            f"| closest_angle:{closest_angle:.2f}deg "
-            f"| direction:{closest_direction} "
-            f"| values:[{raw_values_text}]"
-        )
+    def control_loop(self):
+        self.log_mission_state_changed()
 
-    def make_range_values_text(self, lidar_ranges, start_index, end_index):
-        """
-        index 80~100 값을 문자열로 생성.
-        """
-        texts = []
+        if self.mission_state == "WAIT_TRAFFIC_LIGHT":
+            if self.image is None:
+                self.drive(0, 0)
+                return
 
-        for index in range(start_index, end_index + 1):
-            distance = lidar_ranges[index]
+            if not self.traffic_light.active:
+                self.traffic_light.enable()
 
-            if not math.isfinite(distance):
-                texts.append(f"{index:03d}:inf")
-            else:
-                texts.append(f"{index:03d}:{distance:.2f}")
-
-        return " ".join(texts)
-
-    def get_closest_in_range(self, lidar_ranges, start_index, end_index):
-        """
-        지정 범위 안에서 가장 가까운 유효값 찾기.
-        """
-        candidates = []
-
-        for index in range(start_index, end_index + 1):
-            distance = lidar_ranges[index]
-
-            if not math.isfinite(distance):
-                continue
-
-            if distance <= 0.0:
-                continue
-
-            angle_deg = self.index_to_angle_deg(index)
-            direction = self.angle_to_direction(angle_deg)
-
-            candidates.append(
-                {
-                    "distance": float(distance),
-                    "index": int(index),
-                    "angle_deg": float(angle_deg),
-                    "direction": direction
-                }
+            state, detected_light, debug_frame = self.traffic_light.process(
+                self.image
             )
 
-        if len(candidates) == 0:
-            return None
+            self.log_traffic_light_state_changed(state)
 
-        candidates.sort(key=lambda item: item["distance"])
+            if state == "STOP":
+                self.drive(0, 0)
 
-        return candidates[0]
+            elif state == "GO":
+                self.drive(0, 0)
 
-    def index_to_angle_deg(self, index):
-        """
-        라이다 index를 차량 기준 각도로 변환.
+                self.traffic_light.disable()
+                self.close_traffic_light_window()
 
-        기준:
-            index 90 = 전방 0도
-            index 80 = 왼쪽 -10도
-            index 100 = 오른쪽 +10도
-        """
-        angle = float(index) - 90.0
+                self.mission_state = "CONE_DRIVE"
 
-        while angle > 180.0:
-            angle -= 360.0
+                self.get_logger().info("Traffic light mission complete")
 
-        while angle < -180.0:
-            angle += 360.0
+        elif self.mission_state == "CONE_DRIVE":
+            if not self.cone_driver_started:
+                self.cone_driver.start()
+                self.cone_driver_started = True
 
-        return angle
+            angle, speed = self.cone_driver.process(self.lidar_ranges)
 
-    def angle_to_direction(self, angle_deg):
-        """
-        각도를 방향 문자열로 변환.
-        """
-        if angle_deg is None:
-            return "UNKNOWN"
+            self.drive(angle, speed)
 
-        if -30.0 <= angle_deg <= 30.0:
-            return "FRONT"
-
-        if 30.0 < angle_deg <= 150.0:
-            return "RIGHT"
-
-        if -150.0 <= angle_deg < -30.0:
-            return "LEFT"
-
-        return "BACK"
+        else:
+            self.drive(0, 0)
 
 
 def main(args=None):
@@ -275,7 +187,17 @@ def main(args=None):
     finally:
         try:
             if rclpy.ok():
-                node.drive(0.0, 0.0)
+                node.drive(0, 0)
+        except Exception:
+            pass
+
+        try:
+            node.cone_driver.stop()
+        except Exception:
+            pass
+
+        try:
+            cv2.destroyAllWindows()
         except Exception:
             pass
 

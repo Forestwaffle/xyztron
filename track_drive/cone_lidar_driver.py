@@ -8,23 +8,33 @@ import matplotlib.pyplot as plt
 
 class ConeLidarDriver:
     """
-    목표:
-        1. 기본은 직진
-        2. 전방에 벽/장애물이 가까워지면 정지
-        3. 전체 방향에서 가장 가까운 값도 INFO에 표시
-        4. STOP/GO 판단은 전방 구간만 사용
-        5. 전체 라이다 360개 값을 모두 INFO 로그로 출력
+    LiDAR index 기준:
+        index 0   = 왼쪽
+        index 90  = 정면
+        index 180 = 오른쪽
 
-    입력:
-        /scan LaserScan.ranges
+    이번 로직:
+        1. 왼쪽 구간 중앙값 계산
+            - index 0~59
 
-    출력:
-        angle:
-            기본 0.0
+        2. 정면 구간 중앙값 계산
+            - index 60~119
 
-        speed:
-            GO: 5.0
-            STOP: 0.0
+        3. 오른쪽 구간 중앙값 계산
+            - index 120~180
+
+        4. INFO에 세 중앙값 출력
+
+        5. 세 중앙값 중 하나라도 stop_median_distance 이하이면 STOP
+
+        6. 아니면 GO
+
+    제외 없음:
+        - 특정 index 제외 없음
+        - 0.12m 고정값 제외 없음
+        - 0.30m 이하 제거 없음
+
+    단, inf / nan / 0 이하 값은 중앙값 계산이 불가능하므로 계산에서만 제외.
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -36,40 +46,45 @@ class ConeLidarDriver:
         # =====================================================
         self.forward_speed = 5.0
 
-        # 전방 장애물 정지 거리
-        self.front_stop_distance = 0.80
-
-        # =====================================================
-        # Front sector
-        # =====================================================
-        # 기준:
-        #   index 90 = 전방
+        # 중앙값 정지 기준
+        # 주의:
+        #   오른쪽 120~180 구간에 0.12m 고정값이 많으면
+        #   이 값을 너무 높게 잡으면 계속 STOP 될 수 있음.
         #
-        # 전방 벽 판단용 범위
-        self.front_index_min = 70
-        self.front_index_max = 110
+        # 처음 테스트는 0.10으로 시작.
+        # 너무 안 멈추면 0.15, 0.20, 0.30 순서로 올리기.
+        self.stop_median_distance = 0.10
 
         # =====================================================
-        # INFO 출력 설정
+        # Sector ranges
         # =====================================================
-        # control_loop가 20Hz라면:
+        # 사용자가 요청한 단순 구간:
+        #   0~60, 60~120, 120~180
+        #
+        # 중복 방지를 위해 실제 코드에서는:
+        #   left  : 0~59
+        #   front : 60~119
+        #   right : 120~180
+        self.left_indices = list(range(0, 60))        # 0~59
+        self.front_indices = list(range(60, 120))     # 60~119
+        self.right_indices = list(range(120, 181))    # 120~180
+
+        # =====================================================
+        # Logging settings
+        # =====================================================
+        # control_loop 20Hz 기준:
         #   20 = 약 1초
         #   10 = 약 0.5초
         #   5  = 약 0.25초
-        #   1  = 거의 매 루프
+        #   1  = 매 루프
         self.log_interval_count = 5
 
-        # 전체 라이다 360개 값을 모두 로그에 찍을지 여부
-        self.log_all_lidar_values = True
-
-        # 360개 값을 한 줄에 모두 찍으면 너무 길어서 여러 줄로 나눔
-        self.all_value_chunk_size = 60
-
-        # 전체 방향 가까운 값 표시 개수
+        # 각 구간에서 가장 가까운 값 몇 개 출력할지
         self.near_value_count = 5
 
-        # 전방 가까운 값 표시 개수
-        self.front_value_count = 5
+        # 전체 raw 360개 출력 여부
+        self.log_all_lidar_values = False
+        self.all_value_chunk_size = 60
 
         # =====================================================
         # Current output
@@ -77,59 +92,56 @@ class ConeLidarDriver:
         self.angle = 0.0
         self.speed = 0.0
         self.state = "STOP"
+        self.decision = "INIT"
         self.obstacle_detected = False
 
         # =====================================================
+        # Median values
+        # =====================================================
+        self.left_median = None
+        self.front_median = None
+        self.right_median = None
+
+        self.left_count = 0
+        self.front_count = 0
+        self.right_count = 0
+
+        self.left_points = []
+        self.front_points = []
+        self.right_points = []
+
+        # =====================================================
         # Global closest info
-        # 전체 방향에서 가장 가까운 값
-        # 판단에는 사용하지 않고 INFO용으로만 사용
+        # 전체 방향에서 가장 가까운 값.
+        # 판단에는 사용하지 않고 INFO 확인용.
         # =====================================================
         self.closest_distance = None
         self.closest_index = None
         self.closest_angle_deg = None
         self.closest_direction = "UNKNOWN"
 
-        self.near_points = []
-
         # =====================================================
-        # Front closest info
-        # 실제 STOP/GO 판단에 사용
-        # =====================================================
-        self.front_distance = None
-        self.front_index = None
-        self.front_angle_deg = None
-        self.front_direction = "UNKNOWN"
-
-        self.front_points = []
-
-        # =====================================================
-        # Original LiDAR viewer objects
+        # Viewer objects
         # =====================================================
         self.viewer_ready = False
         self.fig = None
         self.ax = None
         self.lidar_points = None
 
-        # Logging
         self.warned_no_lidar = False
         self.log_counter = 0
 
     def start(self):
-        """
-        CONE_DRIVE 상태에 처음 들어왔을 때 한 번 호출.
-        """
         if self.show_debug:
             self.init_lidar_viewer()
 
         self.log_info("ConeLidarDriver started")
 
     def stop(self):
-        """
-        종료 시 정지 및 디버그 창 닫기.
-        """
         self.angle = 0.0
         self.speed = 0.0
         self.state = "STOP"
+        self.decision = "STOP"
 
         if self.viewer_ready:
             try:
@@ -145,20 +157,13 @@ class ConeLidarDriver:
         self.log_info("ConeLidarDriver stopped")
 
     def process(self, lidar_ranges):
-        """
-        기본 로직:
-            - 전체 방향 가까운 값은 INFO용으로 계산
-            - STOP/GO 판단은 전방 구간만 사용
-            - front_distance <= front_stop_distance 이면 STOP
-            - 아니면 GO
-        """
         if lidar_ranges is None:
             if not self.warned_no_lidar:
                 self.log_warn("No LiDAR data yet")
                 self.warned_no_lidar = True
 
-            self.set_stop_state()
             self.clear_all_info()
+            self.set_stop_state("NO_LIDAR")
             self.print_debug(lidar_ranges=None)
             return self.angle, self.speed
 
@@ -168,130 +173,112 @@ class ConeLidarDriver:
             self.update_lidar_viewer(lidar_ranges)
 
         # =====================================================
-        # 1. 전체 방향 가까운 값 계산
-        # 판단용이 아니라 INFO 확인용
+        # 1. 전체 방향 최단값 계산
+        # INFO용. STOP/GO 판단에는 사용하지 않음.
         # =====================================================
-        self.near_points = self.get_near_points(
+        self.update_global_closest(lidar_ranges)
+
+        # =====================================================
+        # 2. 왼쪽 / 정면 / 오른쪽 중앙값 계산
+        # =====================================================
+        self.left_median, self.left_count, self.left_points = self.calculate_sector_median(
             lidar_ranges,
-            count=self.near_value_count,
-            index_min=None,
-            index_max=None
+            self.left_indices
         )
 
-        if len(self.near_points) > 0:
-            closest = self.near_points[0]
-
-            self.closest_distance = closest["distance"]
-            self.closest_index = closest["index"]
-            self.closest_angle_deg = closest["angle_deg"]
-            self.closest_direction = closest["direction"]
-        else:
-            self.closest_distance = None
-            self.closest_index = None
-            self.closest_angle_deg = None
-            self.closest_direction = "UNKNOWN"
-
-        # =====================================================
-        # 2. 전방 구간 가까운 값 계산
-        # 실제 STOP/GO 판단용
-        # =====================================================
-        self.front_points = self.get_near_points(
+        self.front_median, self.front_count, self.front_points = self.calculate_sector_median(
             lidar_ranges,
-            count=self.front_value_count,
-            index_min=self.front_index_min,
-            index_max=self.front_index_max
+            self.front_indices
         )
 
-        if len(self.front_points) > 0:
-            front = self.front_points[0]
-
-            self.front_distance = front["distance"]
-            self.front_index = front["index"]
-            self.front_angle_deg = front["angle_deg"]
-            self.front_direction = front["direction"]
-        else:
-            self.front_distance = None
-            self.front_index = None
-            self.front_angle_deg = None
-            self.front_direction = "UNKNOWN"
+        self.right_median, self.right_count, self.right_points = self.calculate_sector_median(
+            lidar_ranges,
+            self.right_indices
+        )
 
         # =====================================================
-        # 3. STOP/GO 판단
-        # 전방 값만 사용
+        # 3. STOP / GO 판단
+        # 세 중앙값 중 하나라도 기준 이하이면 STOP
         # =====================================================
-        if self.front_distance is None:
-            # 전방 유효값이 없으면 감지 물체 없음으로 보고 GO
-            self.set_go_state()
+        stop_reasons = []
 
-        elif self.front_distance <= self.front_stop_distance:
-            self.set_stop_state()
+        if self.left_median is not None and self.left_median <= self.stop_median_distance:
+            stop_reasons.append("LEFT_MEDIAN_LOW")
 
+        if self.front_median is not None and self.front_median <= self.stop_median_distance:
+            stop_reasons.append("FRONT_MEDIAN_LOW")
+
+        if self.right_median is not None and self.right_median <= self.stop_median_distance:
+            stop_reasons.append("RIGHT_MEDIAN_LOW")
+
+        if len(stop_reasons) > 0:
+            self.set_stop_state("+".join(stop_reasons))
         else:
-            self.set_go_state()
+            self.set_go_state("MEDIAN_SAFE_GO")
 
         self.print_debug(lidar_ranges=lidar_ranges)
 
         return self.angle, self.speed
 
-    def set_go_state(self):
+    # =====================================================
+    # State setters
+    # =====================================================
+
+    def set_go_state(self, decision):
         self.state = "GO"
+        self.decision = decision
         self.obstacle_detected = False
         self.angle = 0.0
         self.speed = self.forward_speed
 
-    def set_stop_state(self):
+    def set_stop_state(self, decision):
         self.state = "STOP"
+        self.decision = decision
         self.obstacle_detected = True
         self.angle = 0.0
         self.speed = 0.0
 
+    # =====================================================
+    # LiDAR calculation
+    # =====================================================
+
     def clear_all_info(self):
+        self.left_median = None
+        self.front_median = None
+        self.right_median = None
+
+        self.left_count = 0
+        self.front_count = 0
+        self.right_count = 0
+
+        self.left_points = []
+        self.front_points = []
+        self.right_points = []
+
         self.closest_distance = None
         self.closest_index = None
         self.closest_angle_deg = None
         self.closest_direction = "UNKNOWN"
-        self.near_points = []
 
-        self.front_distance = None
-        self.front_index = None
-        self.front_angle_deg = None
-        self.front_direction = "UNKNOWN"
-        self.front_points = []
-
-    def get_near_points(self, lidar_ranges, count=5, index_min=None, index_max=None):
+    def calculate_sector_median(self, lidar_ranges, indices):
         """
-        라이다 값 중 가까운 값 여러 개 반환.
+        특정 구간의 중앙값 계산.
 
-        index_min, index_max:
-            None이면 전체 방향
-            값이 있으면 해당 index 구간만 검사
+        제외 정책:
+            - 특정 index 제외 없음
+            - 가까운 값 제거 없음
+            - 단, inf/nan/0 이하는 계산 불가능하므로 제외
 
-        반환 형식:
-            [
-                {
-                    "distance": 0.42,
-                    "index": 90,
-                    "angle_deg": 0.0,
-                    "direction": "FRONT"
-                },
-                ...
-            ]
+        반환:
+            median_value, valid_count, nearest_points
         """
-        if lidar_ranges is None or len(lidar_ranges) == 0:
-            return []
+        valid_values = []
+        points = []
 
-        valid_candidates = []
+        for index in indices:
+            if index < 0 or index >= len(lidar_ranges):
+                continue
 
-        start = 0
-        end = len(lidar_ranges) - 1
-
-        if index_min is not None:
-            start = max(0, int(index_min))
-
-        if index_max is not None:
-            end = min(len(lidar_ranges) - 1, int(index_max))
-
-        for index in range(start, end + 1):
             distance = lidar_ranges[index]
 
             if not math.isfinite(distance):
@@ -300,37 +287,77 @@ class ConeLidarDriver:
             if distance <= 0.0:
                 continue
 
+            distance = float(distance)
+            valid_values.append(distance)
+
             angle_deg = self.index_to_angle_deg(index)
             direction = self.angle_to_direction(angle_deg)
 
-            valid_candidates.append(
+            points.append(
                 {
-                    "distance": float(distance),
+                    "distance": distance,
                     "index": int(index),
                     "angle_deg": float(angle_deg),
                     "direction": direction
                 }
             )
 
-        if len(valid_candidates) == 0:
-            return []
+        if len(valid_values) == 0:
+            return None, 0, []
 
-        valid_candidates.sort(key=lambda item: item["distance"])
+        median_value = float(np.median(valid_values))
 
-        return valid_candidates[:count]
+        points.sort(key=lambda item: item["distance"])
+        nearest_points = points[:self.near_value_count]
+
+        return median_value, len(valid_values), nearest_points
+
+    def update_global_closest(self, lidar_ranges):
+        closest = None
+
+        for index, distance in enumerate(lidar_ranges):
+            if not math.isfinite(distance):
+                continue
+
+            if distance <= 0.0:
+                continue
+
+            distance = float(distance)
+
+            angle_deg = self.index_to_angle_deg(index)
+            direction = self.angle_to_direction(angle_deg)
+
+            point = {
+                "distance": distance,
+                "index": int(index),
+                "angle_deg": float(angle_deg),
+                "direction": direction
+            }
+
+            if closest is None:
+                closest = point
+            elif point["distance"] < closest["distance"]:
+                closest = point
+
+        if closest is None:
+            self.closest_distance = None
+            self.closest_index = None
+            self.closest_angle_deg = None
+            self.closest_direction = "UNKNOWN"
+            return
+
+        self.closest_distance = closest["distance"]
+        self.closest_index = closest["index"]
+        self.closest_angle_deg = closest["angle_deg"]
+        self.closest_direction = closest["direction"]
 
     def index_to_angle_deg(self, index):
         """
-        라이다 index를 차량 기준 각도로 변환.
-
         기준:
-            index 90 = 전방 0도
+            index 90 = 정면 0도
             index 0 = 왼쪽 -90도
             index 180 = 오른쪽 +90도
             index 270 = 후방 180도 근처
-
-        반환:
-            -180도 ~ +180도
         """
         angle = float(index) - 90.0
 
@@ -343,9 +370,6 @@ class ConeLidarDriver:
         return angle
 
     def angle_to_direction(self, angle_deg):
-        """
-        각도를 방향 문자열로 변환.
-        """
         if angle_deg is None:
             return "UNKNOWN"
 
@@ -361,13 +385,10 @@ class ConeLidarDriver:
         return "BACK"
 
     # =====================================================
-    # Original LiDAR Viewer
+    # LiDAR viewer
     # =====================================================
 
     def init_lidar_viewer(self):
-        """
-        원래 LiDAR Debug Viewer 형태로 생성.
-        """
         if self.viewer_ready:
             return
 
@@ -392,9 +413,6 @@ class ConeLidarDriver:
         self.log_info("LiDAR debug viewer started")
 
     def update_lidar_viewer(self, lidar_ranges):
-        """
-        기존 lidar_viewer.py 방식으로 LiDAR Viewer 업데이트.
-        """
         if not self.viewer_ready:
             self.init_lidar_viewer()
 
@@ -438,9 +456,6 @@ class ConeLidarDriver:
     # =====================================================
 
     def make_points_text(self, points):
-        """
-        INFO에 표시할 가까운 값 문자열 생성.
-        """
         if len(points) == 0:
             return "none"
 
@@ -454,7 +469,6 @@ class ConeLidarDriver:
                 f"a:{point['angle_deg']:.1f}deg "
                 f"{point['direction']}"
             )
-
             texts.append(text)
 
         return " | ".join(texts)
@@ -472,9 +486,6 @@ class ConeLidarDriver:
         return f"{value:.2f}deg"
 
     def format_lidar_value(self, value):
-        """
-        라이다 raw value를 로그용 문자열로 변환.
-        """
         if value is None:
             return "None"
 
@@ -487,13 +498,6 @@ class ConeLidarDriver:
         return f"{value:.2f}"
 
     def log_all_ranges(self, lidar_ranges):
-        """
-        전체 라이다 값을 index:value 형태로 모두 INFO 출력.
-
-        예:
-            LIDAR RAW 000-059 | 000:7.60 001:7.61 ...
-            LIDAR RAW 060-119 | 060:3.12 061:3.10 ...
-        """
         if lidar_ranges is None:
             self.log_info("LIDAR RAW | None")
             return
@@ -525,42 +529,35 @@ class ConeLidarDriver:
         self.log_info("LIDAR RAW ALL END")
 
     def print_debug(self, lidar_ranges=None):
-        """
-        터미널 INFO 출력.
-
-        출력 내용:
-            - STOP/GO 상태
-            - 전방 판단값
-            - 전체 방향 최단값
-            - 전방 가까운 값 목록
-            - 전체 가까운 값 목록
-            - 전체 라이다 360개 raw 값
-        """
         self.log_counter += 1
 
         if self.log_counter % self.log_interval_count != 0:
             return
 
-        near_values_text = self.make_points_text(self.near_points)
-        front_values_text = self.make_points_text(self.front_points)
-
-        front_range_text = f"[{self.front_index_min}~{self.front_index_max}]"
+        left_points_text = self.make_points_text(self.left_points)
+        front_points_text = self.make_points_text(self.front_points)
+        right_points_text = self.make_points_text(self.right_points)
 
         self.log_info(
             f"LIDAR STATE:{self.state} "
-            f"| decision:FRONT_ONLY "
-            f"| front_min:{self.format_distance(self.front_distance)} "
-            f"| front_index:{self.front_index} "
-            f"| front_angle:{self.format_angle(self.front_angle_deg)} "
-            f"| front_dir:{self.front_direction} "
-            f"| front_stop:{self.front_stop_distance:.2f}m "
-            f"| front_range:{front_range_text} "
+            f"| decision:{self.decision} "
+            f"| stop_median:{self.stop_median_distance:.2f}m "
+            f"| left_median:{self.format_distance(self.left_median)} "
+            f"| left_count:{self.left_count} "
+            f"| left_range:[0~59] "
+            f"| front_median:{self.format_distance(self.front_median)} "
+            f"| front_count:{self.front_count} "
+            f"| front_range:[60~119] "
+            f"| right_median:{self.format_distance(self.right_median)} "
+            f"| right_count:{self.right_count} "
+            f"| right_range:[120~180] "
             f"| global_min:{self.format_distance(self.closest_distance)} "
             f"| global_index:{self.closest_index} "
             f"| global_angle:{self.format_angle(self.closest_angle_deg)} "
             f"| global_dir:{self.closest_direction} "
-            f"| front_values:[{front_values_text}] "
-            f"| global_near_values:[{near_values_text}] "
+            f"| left_near:[{left_points_text}] "
+            f"| front_near:[{front_points_text}] "
+            f"| right_near:[{right_points_text}] "
             f"| obstacle:{self.obstacle_detected} "
             f"| angle_cmd:{self.angle:.2f} "
             f"| speed_cmd:{self.speed:.2f}"
