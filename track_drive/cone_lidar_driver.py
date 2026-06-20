@@ -24,7 +24,7 @@ class ConeLidarDriver:
             left < 10 또는 right < 10 이면 TURN
 
         TURN:
-            왼쪽 최대 조향으로 주행
+            왼쪽 최대 조향 -100으로 주행
             left > 60 이면 TURN2
 
         TURN2:
@@ -32,7 +32,7 @@ class ConeLidarDriver:
             right < 9 이면 TURN3
 
         TURN3:
-            왼쪽 최대 조향으로 1초 주행
+            왼쪽 조향 -30으로 1초 주행
             이후 FINISH_STOP
 
         FINISH_STOP:
@@ -51,9 +51,12 @@ class ConeLidarDriver:
         self.turn2_speed = 8.0
         self.turn3_speed = 7.0
 
-        # 왼쪽 최대 조향
-        # 만약 실제 차량이 오른쪽으로 꺾이면 +100.0으로 바꾸면 됨.
+        # TURN 상태: 왼쪽 최대 조향
+        # 실제 차량이 반대로 꺾이면 +100.0으로 변경
         self.left_turn_angle = -100.0
+
+        # TURN3 상태: 마지막 1초 동안 약한 왼쪽 조향
+        self.turn3_left_angle = -30.0
 
         # =====================================================
         # Distance thresholds
@@ -80,6 +83,7 @@ class ConeLidarDriver:
         # Logging settings
         # =====================================================
         # 1 = 매 제어 루프마다 출력
+        # 5 = 약 0.25초마다 출력, control_loop 20Hz 기준
         self.log_interval_count = 1
 
         # =====================================================
@@ -195,7 +199,7 @@ class ConeLidarDriver:
 
         # -----------------------------------------------------
         # TURN
-        # 왼쪽으로 최대 조향
+        # 왼쪽 최대 조향 -100
         # left > 60 이면 TURN2
         # -----------------------------------------------------
         elif self.state == "TURN":
@@ -217,7 +221,7 @@ class ConeLidarDriver:
 
         # -----------------------------------------------------
         # TURN3
-        # 왼쪽 최대 조향으로 1초 가고 정지
+        # -30으로 1초 주행 후 정지
         # -----------------------------------------------------
         elif self.state == "TURN3":
             now = time.monotonic()
@@ -230,7 +234,7 @@ class ConeLidarDriver:
             if self.turn3_elapsed >= self.turn3_duration_sec:
                 self.set_finish_stop_state("TURN3_1SEC_DONE_STOP")
             else:
-                self.set_turn3_state("TURN3_LEFT_MAX_1SEC")
+                self.set_turn3_state("TURN3_LEFT_MINUS_30_1SEC")
 
         # -----------------------------------------------------
         # FINISH_STOP
@@ -282,7 +286,9 @@ class ConeLidarDriver:
         self.state = "TURN3"
         self.decision = decision
         self.obstacle_detected = True
-        self.angle = self.left_turn_angle
+
+        # 마지막 TURN3는 -30으로 1초 주행
+        self.angle = self.turn3_left_angle
         self.speed = self.turn3_speed
 
     def set_finish_stop_state(self, decision):
