@@ -56,7 +56,7 @@ class ConeLidarDriver:
         self.left_turn_angle = -100.0
 
         # TURN3 상태: 마지막 1초 동안 약한 왼쪽 조향
-        self.turn3_left_angle = -30.0
+        self.turn3_left_angle = -10.0
 
         # =====================================================
         # Distance thresholds
@@ -71,7 +71,7 @@ class ConeLidarDriver:
         self.turn2_right_trigger_distance = 9.00
 
         # TURN3 duration
-        self.turn3_duration_sec = 1.00
+        self.turn3_duration_sec = 0.50
 
         # =====================================================
         # Sector ranges
