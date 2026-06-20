@@ -52,7 +52,7 @@ class ConeLidarDriver:
         self.turn_start_distance = 10.00
 
         # TURN -> FINISH_STOP 전환 기준
-        self.turn_finish_left_distance = 40.00
+        self.turn_finish_left_distance = 60.00
 
         # =====================================================
         # Sector ranges
