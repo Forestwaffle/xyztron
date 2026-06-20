@@ -68,7 +68,7 @@ class MainDrivingNode(Node):
         self.prev_traffic_light_state = None
         self.prev_mission_state = None
 
-        self.timer = self.create_timer(0.05, self.control_loop)
+        self.timer = self.create_timer(0.02, self.control_loop)
 
     def camera_callback(self, msg):
         try:

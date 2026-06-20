@@ -8,29 +8,26 @@ import matplotlib.pyplot as plt
 
 class ConeLidarDriver:
     """
-    LiDAR Debug Viewer 기준 방향:
+    LiDAR Debug Viewer 기준:
         index 0   = 정면
-        index 90  = 오른쪽/왼쪽 중 실제 뷰어 기준에 따라 확인 필요
+        index 90  = 오른쪽/왼쪽 중 실제 뷰어 기준 확인 필요
         index 180 = 뒤쪽
         index 270 = 반대쪽
 
-    이번 로직:
-        기존 코드에서 오른쪽/왼쪽 범위를 서로 바꿈.
-
+    현재 로직:
         left  : 0~60
         right : 300~359
 
-    상태 로직:
-        GO 상태:
-            left_median < 10 또는 right_median < 10 이면
-            STOP이 아니라 TURN 상태로 전환
+    상태:
+        GO:
+            left 또는 right 중앙값이 10m 밑이면 TURN으로 전환
 
-        TURN 상태:
-            왼쪽으로 핸들을 꺾고 전진
-            left_median > 40 이 되면 정지 상태로 전환
+        TURN:
+            왼쪽 최대 조향으로 전진
+            left 중앙값이 40m 넘으면 FINISH_STOP
 
-        FINISH_STOP 상태:
-            차량 정지 유지
+        FINISH_STOP:
+            정지 유지
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -40,14 +37,13 @@ class ConeLidarDriver:
         # =====================================================
         # Drive parameters
         # =====================================================
-        self.forward_speed = 5.0
-        self.turn_speed = 4.0
+        self.forward_speed = 8.0
+        self.turn_speed = 7.0
 
-        # 왼쪽 조향값
-        # 현재 가정:
-        #   음수 = 왼쪽 조향
-        # 만약 차량이 오른쪽으로 꺾이면 +40.0으로 바꾸면 됨.
-        self.left_turn_angle = -40.0
+        # 왼쪽 최대 조향
+        # Xycar 기준 보통 -100 ~ 100
+        # 왼쪽으로 안 꺾이고 오른쪽으로 꺾이면 +100.0으로 변경
+        self.left_turn_angle = -100.0
 
         # =====================================================
         # Distance thresholds
@@ -55,24 +51,21 @@ class ConeLidarDriver:
         # GO -> TURN 전환 기준
         self.turn_start_distance = 10.00
 
-        # TURN -> STOP 전환 기준
+        # TURN -> FINISH_STOP 전환 기준
         self.turn_finish_left_distance = 40.00
 
         # =====================================================
         # Sector ranges
         # =====================================================
-        # 오른쪽/왼쪽 범위 반대로 수정
         self.left_indices = list(range(0, 61))        # 0~60
         self.right_indices = list(range(300, 360))    # 300~359
 
         # =====================================================
         # Logging settings
         # =====================================================
-        # control_loop 20Hz 기준:
-        # 20 = 약 1초
-        # 10 = 약 0.5초
-        # 5  = 약 0.25초
-        self.log_interval_count = 5
+        # 1 = 매 제어 루프마다 출력
+        # track_drive.py timer를 0.02로 바꾸면 최대 50Hz 출력
+        self.log_interval_count = 1
 
         # =====================================================
         # Current output
@@ -163,10 +156,6 @@ class ConeLidarDriver:
         # 2. 상태 머신
         # =====================================================
 
-        # -----------------------------------------------------
-        # GO 상태
-        # left 또는 right가 10m 밑이면 TURN으로 넘어감
-        # -----------------------------------------------------
         if self.state == "GO":
             turn_reasons = []
 
@@ -181,27 +170,15 @@ class ConeLidarDriver:
             else:
                 self.set_go_state("GO_STRAIGHT")
 
-        # -----------------------------------------------------
-        # TURN 상태
-        # 왼쪽으로 꺾으면서 전진
-        # left_median이 40m 넘으면 정지
-        # -----------------------------------------------------
         elif self.state == "TURN":
             if self.left_median is not None and self.left_median > self.turn_finish_left_distance:
                 self.set_finish_stop_state("LEFT_OVER_40_STOP")
             else:
-                self.set_turn_state("TURN_LEFT_UNTIL_LEFT_OVER_40")
+                self.set_turn_state("TURN_LEFT_MAX")
 
-        # -----------------------------------------------------
-        # FINISH_STOP 상태
-        # 최종 정지 유지
-        # -----------------------------------------------------
         elif self.state == "FINISH_STOP":
             self.set_finish_stop_state("FINISH_STOP_KEEP")
 
-        # -----------------------------------------------------
-        # 알 수 없는 상태면 안전 정지
-        # -----------------------------------------------------
         else:
             self.set_finish_stop_state("UNKNOWN_STATE_STOP")
 
@@ -309,11 +286,6 @@ class ConeLidarDriver:
         if len(valid) == 0:
             return
 
-        # 현재 LiDAR Debug Viewer 기준
-        # index 0   -> 화면 위쪽, 정면
-        # index 90  -> 화면 오른쪽/왼쪽 중 실제 방향 확인 필요
-        # index 180 -> 화면 아래쪽
-        # index 270 -> 반대쪽
         angles = np.deg2rad(np.arange(len(valid)) - 90)
 
         x = -valid * np.cos(angles)
@@ -329,7 +301,7 @@ class ConeLidarDriver:
         # right: 300~359
         colors[(indices >= 300) & (indices < 360)] = 'orange'
 
-        # 기준 정면 index 0 근처 강조
+        # 정면 index 0 근처 강조
         colors[(indices >= 350) & (indices < 360)] = 'red'
         colors[(indices >= 0) & (indices <= 10)] = 'red'
 
