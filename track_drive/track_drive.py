@@ -12,6 +12,7 @@ from cv_bridge import CvBridge
 from xycar_msgs.msg import XycarMotor
 from track_drive.traffic_light_detector import TrafficLightDetector
 from track_drive.cone_lidar_driver import ConeLidarDriver
+from track_drive.auto_drive import AutoDrive
 
 
 class MainDrivingNode(Node):
@@ -79,6 +80,12 @@ class MainDrivingNode(Node):
         )
 
         self.cone_driver_started = False
+
+        # AUTO_DRIVE 로직은 auto_drive.py 파일에서 불러와 사용
+        self.auto_drive = AutoDrive(
+            logger=self.get_logger(),
+            show_debug=True
+        )
 
         # =====================================================
         # Mission state
@@ -229,7 +236,6 @@ class MainDrivingNode(Node):
 
             angle, speed = self.cone_driver.process(self.lidar_ranges)
 
-            # 순서도 반영:
             # left > 53m 또는 left invalid ?
             #   └─ 예 → AUTO_DRIVE
             if self.cone_driver.is_complete():
@@ -239,8 +245,10 @@ class MainDrivingNode(Node):
 
                 self.mission_state = "AUTO_DRIVE"
 
-                # 전환 순간에도 멈추지 않고 직진 유지
-                self.drive(0, self.auto_drive_speed)
+                # AUTO_DRIVE 진입 순간부터 별도 AutoDrive 로직 실행
+                self.auto_drive.start()
+                angle, speed = self.auto_drive.process(self.image)
+                self.drive(angle, speed)
                 return
 
             self.drive(angle, speed)
@@ -249,9 +257,11 @@ class MainDrivingNode(Node):
         # Mission 3: AUTO_DRIVE
         # =====================================================
         elif self.mission_state == "AUTO_DRIVE":
-            # 라바콘 회피 이후 일반 주행 상태
-            # 나중에 차선 인식, 카메라 주행, 다른 미션을 여기에 연결하면 됨
-            self.drive(0, self.auto_drive_speed)
+            # 별도 파일 auto_drive.py에 있는 AutoDrive 로직 실행
+            # 현재 AutoDrive 기능: 정지 + 전방 카메라 디버그 창 표시
+            self.auto_drive.start()
+            angle, speed = self.auto_drive.process(self.image)
+            self.drive(angle, speed)
 
         # =====================================================
         # Safety fallback
@@ -283,6 +293,11 @@ def main(args=None):
 
         try:
             node.cone_driver.stop()
+        except Exception:
+            pass
+
+        try:
+            node.auto_drive.stop()
         except Exception:
             pass
 
