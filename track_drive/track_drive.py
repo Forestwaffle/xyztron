@@ -67,7 +67,7 @@ class MainDrivingNode(Node):
 
         # INFO 출력 주기
         # 0.25초마다 한 번 출력
-        self.log_interval_sec = 0.25
+        self.log_interval_sec = 1
 
         # 정지 명령 주기
         # 20Hz
