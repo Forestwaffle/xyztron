@@ -31,7 +31,7 @@ class MainDrivingNode(Node):
         )
 
         # =====================================================
-        # Camera subscriber: 프로그램 시작하자마자 구독
+        # Camera subscriber
         # =====================================================
         self.camera_sub = self.create_subscription(
             Image,
@@ -41,13 +41,8 @@ class MainDrivingNode(Node):
         )
 
         # =====================================================
-        # LiDAR subscriber: 프로그램 시작하자마자 /scan 구독
-        #
-        # 핵심:
-        #   - 처음부터 라이다를 계속 받음
-        #   - 새 값이 들어오면 self.lidar_ranges에 최신값으로 덮어씀
-        #   - WAIT_TRAFFIC_LIGHT에서는 라이다를 주행에 사용하지 않음
-        #   - CONE_DRIVE부터 최신 라이다 값을 사용해서 주행
+        # LiDAR subscriber
+        # 프로그램 시작부터 /scan 계속 구독
         # =====================================================
         self.lidar_sub = self.create_subscription(
             LaserScan,
@@ -58,23 +53,19 @@ class MainDrivingNode(Node):
 
         self.lidar_ranges = None
         self.lidar_data_received = False
-        self.lidar_count = 0
-        self.lidar_log_interval = 20
+        self.lidar_callback_count = 0
 
-        # =====================================================
         # Motor publisher
-        # =====================================================
         self.motor_pub = self.create_publisher(
             XycarMotor,
             '/xycar_motor',
             10
         )
 
-        # =====================================================
-        # Mission modules
-        # =====================================================
+        # Traffic light detector
         self.traffic_light = TrafficLightDetector(show_debug=True)
 
+        # Cone LiDAR driver
         self.cone_driver = ConeLidarDriver(
             logger=self.get_logger(),
             show_debug=True
@@ -82,20 +73,16 @@ class MainDrivingNode(Node):
 
         self.cone_driver_started = False
 
-        # =====================================================
         # Mission state
-        # =====================================================
         self.mission_state = "WAIT_TRAFFIC_LIGHT"
 
+        # Previous states for logging
         self.prev_traffic_light_state = None
         self.prev_mission_state = None
 
         # Main loop: 20 Hz
         self.timer = self.create_timer(0.05, self.control_loop)
 
-    # =====================================================
-    # Sensor callbacks
-    # =====================================================
     def camera_callback(self, msg):
         """Store latest front camera image."""
         try:
@@ -110,29 +97,25 @@ class MainDrivingNode(Node):
         """
         Store latest LiDAR scan data.
 
-        프로그램 시작부터 계속 실행됨.
-        새로운 /scan 메시지가 들어올 때마다 기존 self.lidar_ranges는
-        새 값으로 덮어쓰기 됨.
+        /scan은 프로그램 시작부터 계속 들어온다.
+        self.lidar_ranges에는 항상 최신값만 저장된다.
         """
-        self.lidar_ranges = list(msg.ranges)
-        self.lidar_count += 1
+        self.lidar_ranges = msg.ranges
+        self.lidar_callback_count += 1
 
         if not self.lidar_data_received:
             self.get_logger().info(
-                f"LiDAR data received: {len(self.lidar_ranges)} beams"
+                f"LiDAR data received: {len(msg.ranges)} beams"
             )
             self.lidar_data_received = True
 
-        # /scan이 계속 갱신되는지 확인용 로그
-        if self.lidar_count % self.lidar_log_interval == 0:
+        # 라이다 콜백이 계속 들어오는지 확인용
+        if self.lidar_callback_count % 20 == 0:
             self.get_logger().info(
-                f"LiDAR update #{self.lidar_count} | "
-                f"beams:{len(self.lidar_ranges)}"
+                f"LiDAR update #{self.lidar_callback_count} "
+                f"| beams:{len(msg.ranges)}"
             )
 
-    # =====================================================
-    # Motor control
-    # =====================================================
     def drive(self, angle, speed):
         """Publish motor command."""
         if not rclpy.ok():
@@ -142,16 +125,12 @@ class MainDrivingNode(Node):
             self.motor_msg.angle = float(angle)
             self.motor_msg.speed = float(speed)
             self.motor_pub.publish(self.motor_msg)
-
         except Exception as e:
             try:
                 self.get_logger().warn(f"Motor publish skipped: {e}")
             except Exception:
                 pass
 
-    # =====================================================
-    # Utility functions
-    # =====================================================
     def close_traffic_light_window(self):
         """Close traffic light debug window safely."""
         try:
@@ -176,25 +155,21 @@ class MainDrivingNode(Node):
             )
             self.prev_traffic_light_state = state
 
-    # =====================================================
-    # Main control loop
-    # =====================================================
     def control_loop(self):
         """Main mission logic."""
-        if self.image is None:
-            self.drive(0, 0)
-            return
-
         self.log_mission_state_changed()
 
         # =====================================================
-        # WAIT_TRAFFIC_LIGHT
-        #
-        # - 신호등만 판단
-        # - 라이다는 이미 받고 있지만 주행에는 사용하지 않음
-        # - 차량 속도는 무조건 0.0
+        # WAIT_TRAFFIC_LIGHT:
+        #   - 신호등만 판단
+        #   - 라이다는 받고 있지만 사용하지 않음
+        #   - 차량은 정지
         # =====================================================
         if self.mission_state == "WAIT_TRAFFIC_LIGHT":
+            if self.image is None:
+                self.drive(0, 0)
+                return
+
             if not self.traffic_light.active:
                 self.traffic_light.enable()
 
@@ -208,7 +183,6 @@ class MainDrivingNode(Node):
                 self.drive(0, 0)
 
             elif state == "GO":
-                # 상태 전환 순간에도 일단 정지
                 self.drive(0, 0)
 
                 self.traffic_light.disable()
@@ -219,11 +193,9 @@ class MainDrivingNode(Node):
                 self.get_logger().info("Traffic light mission complete")
 
         # =====================================================
-        # CONE_DRIVE
-        #
-        # - 여기서부터 라이다 값을 주행에 사용
-        # - self.lidar_ranges에는 이미 최신 /scan 값이 들어와 있음
-        # - 이후에도 새 /scan이 들어올 때마다 최신값으로 덮어쓰기 됨
+        # CONE_DRIVE:
+        #   - 이미 받아둔 최신 라이다 self.lidar_ranges 사용
+        #   - STOP/GO 판단은 cone_lidar_driver.py에서 수행
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
             if not self.cone_driver_started:
@@ -235,7 +207,7 @@ class MainDrivingNode(Node):
             self.drive(angle, speed)
 
         # =====================================================
-        # Safety fallback
+        # Safety stop
         # =====================================================
         else:
             self.drive(0, 0)
