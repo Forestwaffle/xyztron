@@ -32,6 +32,8 @@ class MainDrivingNode(Node):
 
         self.motor_msg = XycarMotor()
 
+        self.auto_drive_speed = 8.0
+
         # =====================================================
         # QoS
         # =====================================================
@@ -178,7 +180,7 @@ class MainDrivingNode(Node):
         self.log_mission_state_changed()
 
         # =====================================================
-        # Mission 1: wait traffic light
+        # Mission 1: WAIT_TRAFFIC_LIGHT
         # =====================================================
         if self.mission_state == "WAIT_TRAFFIC_LIGHT":
             if self.image is None:
@@ -208,48 +210,48 @@ class MainDrivingNode(Node):
                 # 라바콘 주행으로 전환
                 self.mission_state = "CONE_DRIVE"
 
-                self.get_logger().info("Traffic light mission complete")
+                self.get_logger().info(
+                    "Traffic light mission complete -> CONE_DRIVE"
+                )
 
         # =====================================================
-        # Mission 2: cone lidar drive
+        # Mission 2: CONE_DRIVE
         # =====================================================
         elif self.mission_state == "CONE_DRIVE":
-            if not self.cone_driver_started:
-                self.cone_driver.start()
-                self.cone_driver_started = True
-
             if self.lidar_ranges is None:
                 self.get_logger().warn("Waiting for LiDAR data...")
                 self.drive(0, 0)
                 return
 
+            if not self.cone_driver_started:
+                self.cone_driver.start()
+                self.cone_driver_started = True
+
             angle, speed = self.cone_driver.process(self.lidar_ranges)
 
-            # =================================================
-            # 핵심 부분:
-            # ConeLidarDriver 내부 상태가 FORWARD가 되면
-            # 메인 미션 상태를 AUTO_DRIVE로 변경
-            # =================================================
-            if self.cone_driver.state == "FORWARD":
+            # 순서도 반영:
+            # left > 53m 또는 left invalid ?
+            #   └─ 예 → AUTO_DRIVE
+            if self.cone_driver.is_complete():
                 self.get_logger().info(
-                    "Cone drive complete. Switching to AUTO_DRIVE"
+                    "Cone mission complete. Switching to AUTO_DRIVE"
                 )
 
                 self.mission_state = "AUTO_DRIVE"
 
                 # 전환 순간에도 멈추지 않고 직진 유지
-                self.drive(0, 8)
+                self.drive(0, self.auto_drive_speed)
                 return
 
             self.drive(angle, speed)
 
         # =====================================================
-        # Mission 3: auto drive
+        # Mission 3: AUTO_DRIVE
         # =====================================================
         elif self.mission_state == "AUTO_DRIVE":
             # 라바콘 회피 이후 일반 주행 상태
             # 나중에 차선 인식, 카메라 주행, 다른 미션을 여기에 연결하면 됨
-            self.drive(0, 8)
+            self.drive(0, self.auto_drive_speed)
 
         # =====================================================
         # Safety fallback

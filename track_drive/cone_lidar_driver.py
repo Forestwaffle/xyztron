@@ -23,10 +23,11 @@ class ConeLidarDriver:
 
         TURN:
             왼쪽 최대 조향으로 전진
-            left 중앙값이 53m 넘으면 FORWARD로 전환
+            left 중앙값이 53m 넘거나 left가 invalid이면 AUTO_DRIVE로 전환 준비
 
-        FORWARD:
-            정지하지 않고 계속 직진
+        AUTO_DRIVE:
+            라바콘 회피 완료 상태
+            MainDrivingNode에서 mission_state를 AUTO_DRIVE로 변경
 
     LiDAR debug viewer:
         사용하지 않음
@@ -54,7 +55,7 @@ class ConeLidarDriver:
         # GO -> TURN 전환 기준
         self.turn_start_distance = 10.00
 
-        # TURN -> FORWARD 전환 기준
+        # TURN -> AUTO_DRIVE 전환 기준
         self.turn_finish_left_distance = 53.00
 
         # =====================================================
@@ -91,6 +92,13 @@ class ConeLidarDriver:
         self.log_counter = 0
 
     def start(self):
+        self.state = "GO"
+        self.decision = "START_GO"
+        self.angle = 0.0
+        self.speed = 0.0
+        self.obstacle_detected = False
+        self.warned_no_lidar = False
+
         self.log_info("ConeLidarDriver started without LiDAR debug viewer")
 
     def stop(self):
@@ -109,7 +117,14 @@ class ConeLidarDriver:
                 self.warned_no_lidar = True
 
             self.clear_all_info()
-            self.set_stop_state("NO_LIDAR")
+
+            # 라이다가 잠깐 없을 때 STOP 상태로 고정하지 않는다.
+            # 다음 라이다가 들어오면 기존 state에서 이어서 판단한다.
+            self.decision = "NO_LIDAR_TEMP_STOP"
+            self.obstacle_detected = True
+            self.angle = 0.0
+            self.speed = 0.0
+
             self.print_debug()
             return self.angle, self.speed
 
@@ -135,10 +150,16 @@ class ConeLidarDriver:
         if self.state == "GO":
             turn_reasons = []
 
-            if self.left_median is not None and self.left_median < self.turn_start_distance:
+            if (
+                self.left_median is not None
+                and self.left_median < self.turn_start_distance
+            ):
                 turn_reasons.append("LEFT")
 
-            if self.right_median is not None and self.right_median < self.turn_start_distance:
+            if (
+                self.right_median is not None
+                and self.right_median < self.turn_start_distance
+            ):
                 turn_reasons.append("RIGHT")
 
             if len(turn_reasons) > 0:
@@ -147,13 +168,27 @@ class ConeLidarDriver:
                 self.set_go_state("GO_STRAIGHT")
 
         elif self.state == "TURN":
-            if self.left_median is not None and self.left_median > self.turn_finish_left_distance:
-                self.set_forward_state("LEFT_OVER_53_FORWARD")
+            # 순서도 반영:
+            # left > 53m 또는 left invalid ?
+            #   ├─ 아니오 → 계속 왼쪽 최대 조향
+            #   └─ 예     → AUTO_DRIVE
+            if self.left_median is None:
+                self.set_auto_drive_state("LEFT_INVALID_AUTO_DRIVE")
+
+            elif self.left_median > self.turn_finish_left_distance:
+                self.set_auto_drive_state("LEFT_OVER_53_AUTO_DRIVE")
+
             else:
                 self.set_turn_state("TURN_LEFT_MAX")
 
-        elif self.state == "FORWARD":
-            self.set_forward_state("FORWARD_KEEP")
+        elif self.state == "AUTO_DRIVE":
+            # MainDrivingNode가 mission_state를 AUTO_DRIVE로 바꾸기 전까지
+            # 한 루프 정도 더 호출되어도 직진 유지
+            self.set_auto_drive_state("AUTO_DRIVE_KEEP")
+
+        elif self.state == "STOP":
+            # STOP 상태에 갇히지 않도록 복구
+            self.set_go_state("RECOVER_FROM_STOP")
 
         else:
             self.set_stop_state("UNKNOWN_STATE_STOP")
@@ -180,8 +215,8 @@ class ConeLidarDriver:
         self.angle = self.left_turn_angle
         self.speed = self.turn_speed
 
-    def set_forward_state(self, decision):
-        self.state = "FORWARD"
+    def set_auto_drive_state(self, decision):
+        self.state = "AUTO_DRIVE"
         self.decision = decision
         self.obstacle_detected = False
         self.angle = 0.0
@@ -193,6 +228,9 @@ class ConeLidarDriver:
         self.obstacle_detected = True
         self.angle = 0.0
         self.speed = 0.0
+
+    def is_complete(self):
+        return self.state == "AUTO_DRIVE"
 
     # =====================================================
     # LiDAR calculation
@@ -246,13 +284,15 @@ class ConeLidarDriver:
             return
 
         self.log_info(
-            f"LiDAR TURN | "
+            f"LiDAR CONE | "
             f"state:{self.state} | "
             f"decision:{self.decision} | "
             f"start_under:{self.turn_start_distance:.2f}m | "
             f"finish_left_over:{self.turn_finish_left_distance:.2f}m | "
             f"left:{self.format_distance(self.left_median)} | "
+            f"left_count:{self.left_count} | "
             f"right:{self.format_distance(self.right_median)} | "
+            f"right_count:{self.right_count} | "
             f"angle:{self.angle:.2f} | "
             f"speed:{self.speed:.2f}"
         )
