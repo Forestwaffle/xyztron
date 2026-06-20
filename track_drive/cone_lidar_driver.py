@@ -21,12 +21,12 @@ class ConeLidarDriver:
         right : 0~60
 
     판단:
-        left_median  < 1.00m 이면 STOP
-        right_median < 1.00m 이면 STOP
-        둘 다 1.00m 이상이면 GO
+        left_median  < 10.00m 이면 STOP
+        right_median < 10.00m 이면 STOP
+        둘 다 10.00m 이상이면 GO
 
     로그:
-        LiDAR MEDIAN | state:GO | right:... | left:...
+        LiDAR MEDIAN | state:GO | stop_under:10.00m | right:... | left:...
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -40,8 +40,9 @@ class ConeLidarDriver:
 
         # =====================================================
         # Stop distance
+        # 10m 밑이면 정지
         # =====================================================
-        self.stop_distance = 1.00
+        self.stop_distance = 10.00
 
         # =====================================================
         # Sector ranges
@@ -101,6 +102,7 @@ class ConeLidarDriver:
         self.speed = 0.0
         self.state = "STOP"
         self.decision = "STOP"
+        self.obstacle_detected = True
 
         if self.viewer_ready:
             try:
@@ -271,7 +273,7 @@ class ConeLidarDriver:
         if len(valid) == 0:
             return
 
-        # 현재 네가 보는 LiDAR Debug Viewer 기준
+        # 현재 LiDAR Debug Viewer 기준
         # index 0   -> 화면 위쪽, 정면
         # index 90  -> 화면 오른쪽
         # index 180 -> 화면 아래쪽
@@ -330,8 +332,11 @@ class ConeLidarDriver:
         self.log_info(
             f"LiDAR MEDIAN | "
             f"state:{self.state} | "
+            f"decision:{self.decision} | "
+            f"stop_under:{self.stop_distance:.2f}m | "
             f"right:{self.format_distance(self.right_median)} | "
-            f"left:{self.format_distance(self.left_median)}"
+            f"left:{self.format_distance(self.left_median)} | "
+            f"speed:{self.speed:.2f}"
         )
 
     def log_info(self, msg):
