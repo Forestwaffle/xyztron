@@ -10,61 +10,49 @@ class ConeLidarDriver:
     """
     LiDAR Debug Viewer 기준 방향:
         index 0   = 정면
-        index 90  = 왼쪽
+        index 90  = 오른쪽
         index 180 = 뒤쪽
-        index 270 = 오른쪽
+        index 270 = 왼쪽
 
     판단 범위:
         front : 330~359 + 0~30
-        left  : 60~120
-        right : 240~300
+        right : 60~120
+        left  : 240~300
 
     로직:
-        1. 정면 / 왼쪽 / 오른쪽 중앙값 계산
-        2. 정면 중앙값 <= front_stop_distance 이면 STOP
-        3. 왼쪽 중앙값 <= left_stop_distance 이면 STOP
-        4. 오른쪽 중앙값 <= right_stop_distance 이면 STOP
-        5. 아니면 GO
-        6. 로그는 state, front, right, left 중앙값만 출력
+        1. 정면 / 오른쪽 / 왼쪽 중앙값 계산
+        2. 셋 중 하나라도 1.00m보다 작으면 STOP
+        3. 아니면 GO
     """
 
     def __init__(self, logger=None, show_debug=True):
         self.logger = logger
         self.show_debug = show_debug
 
-        # =====================================================
-        # Drive parameters
-        # =====================================================
         self.forward_speed = 5.0
 
         # =====================================================
-        # Stop distances
+        # Stop distance
+        # 셋 중 하나라도 1m보다 작으면 정지
         # =====================================================
-        # 정면은 충돌 방지를 위해 크게 잡는다.
-        self.front_stop_distance = 0.80
-
-        # 좌우는 너무 민감하면 벽/측면 때문에 멈출 수 있으므로 낮게 시작.
-        self.left_stop_distance = 0.50
-        self.right_stop_distance = 0.50
+        self.front_stop_distance = 1.00
+        self.right_stop_distance = 1.00
+        self.left_stop_distance = 1.00
 
         # =====================================================
-        # Sector ranges based on LiDAR Debug Viewer
+        # Sector ranges
         # =====================================================
         self.front_indices = (
             list(range(330, 360)) + list(range(0, 31))
         )                                                   # 330~359 + 0~30
 
-        self.left_indices = list(range(60, 121))             # 60~120
+        self.right_indices = list(range(60, 121))            # 60~120
 
-        self.right_indices = list(range(240, 301))           # 240~300
+        self.left_indices = list(range(240, 301))            # 240~300
 
         # =====================================================
         # Logging settings
         # =====================================================
-        # control_loop 20Hz 기준:
-        # 20 = 약 1초
-        # 10 = 약 0.5초
-        # 5  = 약 0.25초
         self.log_interval_count = 5
 
         # =====================================================
@@ -80,12 +68,12 @@ class ConeLidarDriver:
         # Median values
         # =====================================================
         self.front_median = None
-        self.left_median = None
         self.right_median = None
+        self.left_median = None
 
         self.front_count = 0
-        self.left_count = 0
         self.right_count = 0
+        self.left_count = 0
 
         # =====================================================
         # Viewer objects
@@ -95,7 +83,6 @@ class ConeLidarDriver:
         self.ax = None
         self.lidar_points = None
 
-        # Logging
         self.warned_no_lidar = False
         self.log_counter = 0
 
@@ -141,16 +128,11 @@ class ConeLidarDriver:
             self.update_lidar_viewer(lidar_ranges)
 
         # =====================================================
-        # 1. 정면 / 왼쪽 / 오른쪽 중앙값 계산
+        # Median calculation
         # =====================================================
         self.front_median, self.front_count = self.calculate_sector_median(
             lidar_ranges,
             self.front_indices
-        )
-
-        self.left_median, self.left_count = self.calculate_sector_median(
-            lidar_ranges,
-            self.left_indices
         )
 
         self.right_median, self.right_count = self.calculate_sector_median(
@@ -158,19 +140,25 @@ class ConeLidarDriver:
             self.right_indices
         )
 
+        self.left_median, self.left_count = self.calculate_sector_median(
+            lidar_ranges,
+            self.left_indices
+        )
+
         # =====================================================
-        # 2. STOP / GO 판단
+        # STOP / GO
+        # 1m보다 작으면 정지
         # =====================================================
         stop_reasons = []
 
-        if self.front_median is not None and self.front_median <= self.front_stop_distance:
+        if self.front_median is not None and self.front_median < self.front_stop_distance:
             stop_reasons.append("FRONT")
 
-        if self.left_median is not None and self.left_median <= self.left_stop_distance:
-            stop_reasons.append("LEFT")
-
-        if self.right_median is not None and self.right_median <= self.right_stop_distance:
+        if self.right_median is not None and self.right_median < self.right_stop_distance:
             stop_reasons.append("RIGHT")
+
+        if self.left_median is not None and self.left_median < self.left_stop_distance:
+            stop_reasons.append("LEFT")
 
         if len(stop_reasons) > 0:
             self.set_stop_state("STOP_BY_" + "_".join(stop_reasons))
@@ -205,22 +193,14 @@ class ConeLidarDriver:
 
     def clear_all_info(self):
         self.front_median = None
-        self.left_median = None
         self.right_median = None
+        self.left_median = None
 
         self.front_count = 0
-        self.left_count = 0
         self.right_count = 0
+        self.left_count = 0
 
     def calculate_sector_median(self, lidar_ranges, indices):
-        """
-        특정 구간의 중앙값 계산.
-
-        제외 정책:
-            - 특정 index 제외 없음
-            - 가까운 값 강제 제거 없음
-            - 단, inf / nan / 0 이하는 계산 불가능하므로 제외
-        """
         valid_values = []
 
         for index in indices:
@@ -243,42 +223,6 @@ class ConeLidarDriver:
         median_value = float(np.median(valid_values))
 
         return median_value, len(valid_values)
-
-    # =====================================================
-    # Correct direction conversion
-    # =====================================================
-
-    def index_to_angle_deg(self, index):
-        """
-        Viewer 기준 각도 변환.
-
-        기준:
-            index 0   = 정면 0도
-            index 90  = 왼쪽 +90도
-            index 180 = 뒤쪽 180도
-            index 270 = 오른쪽 -90도
-        """
-        angle = float(index)
-
-        if angle > 180.0:
-            angle -= 360.0
-
-        return angle
-
-    def angle_to_direction(self, angle_deg):
-        if angle_deg is None:
-            return "UNKNOWN"
-
-        if -30.0 <= angle_deg <= 30.0:
-            return "FRONT"
-
-        if 30.0 < angle_deg <= 150.0:
-            return "LEFT"
-
-        if -150.0 <= angle_deg < -30.0:
-            return "RIGHT"
-
-        return "BACK"
 
     # =====================================================
     # LiDAR viewer
@@ -320,12 +264,6 @@ class ConeLidarDriver:
         if len(valid) == 0:
             return
 
-        # 중요:
-        # 이 변환식이 현재 네가 본 LiDAR Debug Viewer와 같은 기준이다.
-        # index 0   -> 화면 위쪽, 정면
-        # index 90  -> 화면 왼쪽
-        # index 180 -> 화면 아래쪽
-        # index 270 -> 화면 오른쪽
         angles = np.deg2rad(np.arange(len(valid)) - 90)
 
         x = -valid * np.cos(angles)
@@ -333,20 +271,19 @@ class ConeLidarDriver:
 
         indices = np.arange(len(valid))
 
-        # 방향별 색상
         colors = np.full(len(valid), 'gray', dtype=object)
 
-        # 정면: 330~359 + 0~30
+        # 정면: 빨강
         colors[(indices >= 330) & (indices < 360)] = 'red'
         colors[(indices >= 0) & (indices <= 30)] = 'red'
 
-        # 왼쪽: 60~120
-        colors[(indices >= 60) & (indices <= 120)] = 'green'
+        # 오른쪽: 주황
+        colors[(indices >= 60) & (indices <= 120)] = 'orange'
 
-        # 오른쪽: 240~300
-        colors[(indices >= 240) & (indices <= 300)] = 'orange'
+        # 왼쪽: 초록
+        colors[(indices >= 240) & (indices <= 300)] = 'green'
 
-        # 뒤쪽: 150~210
+        # 뒤쪽: 파랑
         colors[(indices >= 150) & (indices <= 210)] = 'blue'
 
         valid_mask = np.isfinite(x) & np.isfinite(y)
