@@ -65,7 +65,7 @@ class ConeLidarDriver:
         self.turn_start_distance = 10.00
 
         # TURN -> TURN2
-        self.turn_finish_left_distance = 60.00
+        self.turn_finish_left_distance = 55.00
 
         # TURN2 -> TURN3
         self.turn2_right_trigger_distance = 9.00
