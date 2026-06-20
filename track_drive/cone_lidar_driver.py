@@ -8,31 +8,25 @@ import matplotlib.pyplot as plt
 
 class ConeLidarDriver:
     """
-    LiDAR Debug Viewer 기준:
+    LiDAR Debug Viewer 기준 방향:
         index 0   = 정면
         index 90  = 오른쪽
         index 180 = 뒤쪽
         index 270 = 왼쪽
 
     이번 로직:
-        정면 기준 좌/우 전방을 본다.
+        정면 기준으로 좌/우 전방만 본다.
 
-        left  : 0~60
-        right : 300~359
+        left  : 300~359
+        right : 0~60
 
-    중앙 찾기:
-        left_median과 right_median을 비교한다.
+    판단:
+        left_median  < 1.00m 이면 STOP
+        right_median < 1.00m 이면 STOP
+        둘 다 1.00m 이상이면 GO
 
-        left_median < right_median:
-            왼쪽이 더 가까움
-            오른쪽으로 조향
-
-        right_median < left_median:
-            오른쪽이 더 가까움
-            왼쪽으로 조향
-
-        두 값이 비슷하면:
-            중앙에 있다고 보고 직진
+    로그:
+        LiDAR MEDIAN | state:GO | right:... | left:...
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -43,40 +37,25 @@ class ConeLidarDriver:
         # Drive parameters
         # =====================================================
         self.forward_speed = 5.0
-        self.slow_speed = 3.0
 
-        # 조향 gain
-        # 값이 클수록 더 많이 꺾음
-        self.steering_gain = 25.0
-
-        # 최대 조향 제한
-        self.max_angle = 50.0
-
-        # 중앙이라고 판단할 좌우 차이
-        self.center_deadband = 0.15
-
-        # 너무 가까우면 긴급 정지
-        self.emergency_stop_distance = 0.30
-
-        # 조향 방향 보정값
-        # 현재 가정:
-        #   angle 양수 = 오른쪽 조향
-        #   angle 음수 = 왼쪽 조향
-        #
-        # 실제 차량이 반대로 꺾이면 -1.0으로 바꾸면 됨.
-        self.steering_sign = 1.0
+        # =====================================================
+        # Stop distance
+        # =====================================================
+        self.stop_distance = 1.00
 
         # =====================================================
         # Sector ranges
         # =====================================================
-        # 오른쪽/왼쪽 범위 바꿈
-        self.left_indices = list(range(0, 61))        # 0~60
-        self.right_indices = list(range(300, 360))    # 300~359
+        # index 0 기준
+        # 왼쪽 전방: 300~359
+        # 오른쪽 전방: 0~60
+        self.left_indices = list(range(300, 360))     # 300~359
+        self.right_indices = list(range(0, 61))       # 0~60
 
         # =====================================================
         # Logging settings
         # =====================================================
-        # 20Hz 기준:
+        # control_loop 20Hz 기준:
         # 20 = 약 1초
         # 10 = 약 0.5초
         # 5  = 약 0.25초
@@ -89,6 +68,7 @@ class ConeLidarDriver:
         self.speed = 0.0
         self.state = "STOP"
         self.decision = "INIT"
+        self.obstacle_detected = False
 
         # =====================================================
         # Median values
@@ -98,8 +78,6 @@ class ConeLidarDriver:
 
         self.left_count = 0
         self.right_count = 0
-
-        self.center_error = 0.0
 
         # =====================================================
         # Viewer objects
@@ -167,83 +145,40 @@ class ConeLidarDriver:
         )
 
         # =====================================================
-        # 2. 유효값 없으면 정지
+        # 2. STOP / GO 판단
         # =====================================================
-        if self.left_median is None or self.right_median is None:
-            self.center_error = 0.0
-            self.set_stop_state("INVALID_MEDIAN")
-            self.print_debug()
-            return self.angle, self.speed
+        stop_reasons = []
 
-        # =====================================================
-        # 3. 너무 가까우면 긴급 정지
-        # =====================================================
-        if (
-            self.left_median < self.emergency_stop_distance or
-            self.right_median < self.emergency_stop_distance
-        ):
-            self.center_error = self.right_median - self.left_median
-            self.set_stop_state("EMERGENCY_CLOSE")
-            self.print_debug()
-            return self.angle, self.speed
+        if self.left_median is not None and self.left_median < self.stop_distance:
+            stop_reasons.append("LEFT")
 
-        # =====================================================
-        # 4. 중앙 찾기
-        # =====================================================
-        # error > 0:
-        #   right_median이 더 큼
-        #   left가 더 가까움
-        #   오른쪽으로 조향
-        #
-        # error < 0:
-        #   left_median이 더 큼
-        #   right가 더 가까움
-        #   왼쪽으로 조향
-        self.center_error = self.right_median - self.left_median
+        if self.right_median is not None and self.right_median < self.stop_distance:
+            stop_reasons.append("RIGHT")
 
-        if abs(self.center_error) <= self.center_deadband:
-            self.set_go_state(
-                decision="CENTER_GO",
-                angle=0.0,
-                speed=self.forward_speed
-            )
-
+        if len(stop_reasons) > 0:
+            self.set_stop_state("STOP_BY_" + "_".join(stop_reasons))
         else:
-            raw_angle = self.center_error * self.steering_gain
-            angle = self.clamp(
-                raw_angle * self.steering_sign,
-                -self.max_angle,
-                self.max_angle
-            )
-
-            # 차이가 크면 조금 느리게
-            if abs(self.center_error) >= 1.0:
-                speed = self.slow_speed
-            else:
-                speed = self.forward_speed
-
-            self.set_go_state(
-                decision="CENTER_STEER",
-                angle=angle,
-                speed=speed
-            )
+            self.set_go_state("GO")
 
         self.print_debug()
+
         return self.angle, self.speed
 
     # =====================================================
     # State setters
     # =====================================================
 
-    def set_go_state(self, decision, angle, speed):
+    def set_go_state(self, decision):
         self.state = "GO"
         self.decision = decision
-        self.angle = float(angle)
-        self.speed = float(speed)
+        self.obstacle_detected = False
+        self.angle = 0.0
+        self.speed = self.forward_speed
 
     def set_stop_state(self, decision):
         self.state = "STOP"
         self.decision = decision
+        self.obstacle_detected = True
         self.angle = 0.0
         self.speed = 0.0
 
@@ -258,9 +193,21 @@ class ConeLidarDriver:
         self.left_count = 0
         self.right_count = 0
 
-        self.center_error = 0.0
-
     def calculate_sector_median(self, lidar_ranges, indices):
+        """
+        특정 구간의 중앙값 계산.
+
+        제외:
+            - 특정 index 제외 없음
+            - 가까운 값 강제 제거 없음
+
+        단:
+            - inf
+            - nan
+            - 0 이하 값
+
+        위 값들은 중앙값 계산이 불가능하므로 제외.
+        """
         valid_values = []
 
         for index in indices:
@@ -283,9 +230,6 @@ class ConeLidarDriver:
         median_value = float(np.median(valid_values))
 
         return median_value, len(valid_values)
-
-    def clamp(self, value, min_value, max_value):
-        return max(min_value, min(max_value, value))
 
     # =====================================================
     # LiDAR viewer
@@ -327,6 +271,11 @@ class ConeLidarDriver:
         if len(valid) == 0:
             return
 
+        # 현재 네가 보는 LiDAR Debug Viewer 기준
+        # index 0   -> 화면 위쪽, 정면
+        # index 90  -> 화면 오른쪽
+        # index 180 -> 화면 아래쪽
+        # index 270 -> 화면 왼쪽
         angles = np.deg2rad(np.arange(len(valid)) - 90)
 
         x = -valid * np.cos(angles)
@@ -336,17 +285,17 @@ class ConeLidarDriver:
 
         colors = np.full(len(valid), 'gray', dtype=object)
 
-        # left: 0~60
-        colors[(indices >= 0) & (indices <= 60)] = 'green'
+        # 오른쪽 전방: 0~60
+        colors[(indices >= 0) & (indices <= 60)] = 'orange'
 
-        # right: 300~359
-        colors[(indices >= 300) & (indices < 360)] = 'orange'
+        # 왼쪽 전방: 300~359
+        colors[(indices >= 300) & (indices < 360)] = 'green'
 
-        # 정면 index 0 근처 강조
+        # 기준 정면 index 0 근처 강조
         colors[(indices >= 350) & (indices < 360)] = 'red'
         colors[(indices >= 0) & (indices <= 10)] = 'red'
 
-        # 후방 참고
+        # 뒤쪽 참고
         colors[(indices >= 150) & (indices <= 210)] = 'blue'
 
         valid_mask = np.isfinite(x) & np.isfinite(y)
@@ -379,14 +328,10 @@ class ConeLidarDriver:
             return
 
         self.log_info(
-            f"LiDAR CENTER | "
+            f"LiDAR MEDIAN | "
             f"state:{self.state} | "
-            f"decision:{self.decision} | "
-            f"left:{self.format_distance(self.left_median)} | "
             f"right:{self.format_distance(self.right_median)} | "
-            f"error:{self.center_error:.2f} | "
-            f"angle:{self.angle:.2f} | "
-            f"speed:{self.speed:.2f}"
+            f"left:{self.format_distance(self.left_median)}"
         )
 
     def log_info(self, msg):
