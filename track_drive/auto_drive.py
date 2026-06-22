@@ -18,9 +18,9 @@ class AutoDrive:
         3. 노란색만 HSV로 검출
         4. 노란색 픽셀을 x = a*y + b 직선으로 피팅
         5. 노란색 점선이 끊기면 이전 직선 모델로 잠깐 예측
-        6. lookahead_y 위치에서 노란선의 예상 x 좌표 계산
-        7. 차량 중심과 노란선 x 좌표 오차로 조향
-        8. 오차가 크면 강하게 반응하고, 오차가 작으면 부드럽게 반응한다.
+        6. 예측도 끝났는데 노란선이 안 보이면 마지막 조향각 유지
+        7. 노란선이 다시 보이면 새로 피팅해서 주행
+        8. 오차가 크면 강하게, 오차가 작으면 부드럽게 반응
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -40,11 +40,11 @@ class AutoDrive:
         # 점선이 끊겨서 예측으로 갈 때 속도
         self.prediction_speed = 5.0
 
-        # 노란선도 예측도 안 될 때 직진 속도
+        # 노란선도 예측도 안 될 때, 마지막 각도 유지하면서 천천히 주행
         self.no_line_speed = 4.0
 
         # 최대 조향각
-        self.max_angle = 80.0
+        self.max_angle = 100.0
 
         # =====================================================
         # Control parameters
@@ -59,7 +59,7 @@ class AutoDrive:
         # 가까운 지점. 선의 진행 방향 예측용.
         self.near_y_ratio = 0.95
 
-        # 기울기 기반 예측 보정 게인.
+        # 기울기 기반 예측 보정 게인
         self.heading_gain = 0.30
 
         # 조향 방향 보정.
@@ -76,19 +76,19 @@ class AutoDrive:
         self.far_error_px = 120.0
 
         # 가까울 때 조향 gain
-        self.min_center_gain = 0.10
+        self.min_center_gain = 0.14
 
         # 멀 때 조향 gain
-        self.max_center_gain = 0.38
+        self.max_center_gain = 0.55
 
         # 작은 오차 무시 구간
         self.dead_zone_px = 5.0
 
         # 가까울 때 smoothing: 부드럽고 천천히 반응
-        self.near_smoothing_alpha = 0.82
+        self.near_smoothing_alpha = 0.75
 
         # 멀 때 smoothing: 빠르게 반응
-        self.far_smoothing_alpha = 0.45
+        self.far_smoothing_alpha = 0.30
 
         self.last_dynamic_gain = 0.0
         self.last_dynamic_smoothing = 0.0
@@ -134,6 +134,7 @@ class AutoDrive:
 
         self.line_detected = False
         self.using_prediction = False
+        self.holding_angle = False
 
         self.last_line_x = None
         self.last_near_x = None
@@ -187,7 +188,7 @@ class AutoDrive:
                 self.log_warn("AUTO_DRIVE: waiting for camera image...")
                 self.warned_no_image = True
 
-            self.angle = 0.0
+            self.angle = self.prev_angle
             self.speed = self.no_line_speed
             return self.angle, self.speed
 
@@ -196,9 +197,11 @@ class AutoDrive:
         result = self.detect_yellow_line(image)
 
         if result is None:
-            # 노란선도 없고 예측도 불가능하면 느린 직진
+            # 노란선도 없고 예측도 불가능하면
+            # angle=0으로 풀지 않고 마지막 조향각 유지
             self.line_detected = False
             self.using_prediction = False
+            self.holding_angle = True
 
             self.last_line_x = None
             self.last_near_x = None
@@ -210,15 +213,16 @@ class AutoDrive:
             self.last_dynamic_gain = 0.0
             self.last_dynamic_smoothing = 0.0
 
-            self.angle = 0.0
+            # 핵심: 마지막 조향각 유지
+            self.angle = self.prev_angle
             self.speed = self.no_line_speed
-            self.prev_angle = 0.0
 
         else:
             line_x, near_x, target_x, detected_now, pixel_count = result
 
             self.line_detected = detected_now
             self.using_prediction = not detected_now
+            self.holding_angle = False
 
             self.last_line_x = line_x
             self.last_near_x = near_x
@@ -427,8 +431,9 @@ class AutoDrive:
                 self.prediction_count += 1
                 detected_now = False
             else:
-                self.last_fit = None
-                self.prediction_count = 0
+                # 예측 프레임을 넘겨도 last_fit은 지우지 않는다.
+                # process()에서 마지막 조향각을 유지한다.
+                self.prediction_count = self.max_prediction_frames
                 return None
 
         if fit is None:
@@ -592,7 +597,10 @@ class AutoDrive:
             )
 
         # 상태 표시
-        if self.using_prediction:
+        if self.holding_angle:
+            status = "NO LINE - HOLD ANGLE"
+            status_color = (0, 0, 255)
+        elif self.using_prediction:
             status = "YELLOW PREDICTION"
             status_color = (0, 165, 255)
         elif self.line_detected:
@@ -655,6 +663,17 @@ class AutoDrive:
                 (20, 170),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
+                (255, 255, 255),
+                2
+            )
+        else:
+            cv2.putText(
+                warped_debug,
+                f"HOLD_ANGLE:{self.prev_angle:.2f} "
+                f"PRED:{self.prediction_count}",
+                (20, 110),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.60,
                 (255, 255, 255),
                 2
             )
@@ -721,6 +740,7 @@ class AutoDrive:
             f"AUTO_DRIVE | "
             f"detected:{self.line_detected} | "
             f"prediction:{self.using_prediction} | "
+            f"hold:{self.holding_angle} | "
             f"line_x:{line_x_text} | "
             f"err:{err_text} | "
             f"ctrl:{ctrl_text} | "
