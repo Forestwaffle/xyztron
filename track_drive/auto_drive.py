@@ -18,7 +18,7 @@ class AutoDrive:
         self.prev_angle = 0.0
 
         # 영상 분석 반영값
-        self.steering_sign = -1.0
+        self.steering_sign = 1.0
         self.target_center_x_ratio = 0.50
         self.roi_y_start_ratio = 0.30
         self.lookahead_y_ratio = 0.68
