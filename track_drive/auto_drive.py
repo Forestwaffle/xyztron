@@ -9,12 +9,16 @@ class AutoDrive:
     """
     흰색 차선 중앙 추종 AUTO_DRIVE.
 
-    핵심 변경:
-        - 작은 오차에서는 핸들을 새로 꺾지 않고 기존 각도를 서서히 줄임
-        - 큰 오차가 생기는 순간 강하게 조향
-        - hysteresis 적용:
-            turn_start_error_px 이상이면 조향 시작
-            turn_release_error_px 이하로 줄어들면 조향 해제
+    동작:
+        1. 전방 카메라 이미지를 Bird's Eye View로 변환
+        2. 화면 아래 70% ROI 사용
+        3. 흰색 차선만 검출
+        4. 하단 histogram으로 왼쪽/오른쪽 차선 시작점 탐색
+        5. sliding window로 좌/우 차선 픽셀 추적
+        6. 좌/우 차선을 2차 곡선으로 피팅
+        7. 두 흰선 사이 중앙을 계산
+        8. 차량 중심이 차선 중앙으로 가도록 조향
+        9. 속도는 항상 +4.0
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -28,15 +32,21 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
+        # 요청 반영: 속도는 +4만 사용
         self.drive_speed = 4.0
+
         self.max_angle = 100.0
-        self.prev_angle = 0.0
 
         # =====================================================
         # ROI / control parameters
         # =====================================================
+        # 화면 아래 70% 사용
         self.roi_y_start_ratio = 0.30
+
+        # 더 앞쪽 차선 기준
         self.lookahead_y_ratio = 0.60
+
+        # 가까운 기준점
         self.near_y_ratio = 0.95
 
         self.target_center_x_ratio = 0.50
@@ -49,30 +59,20 @@ class AutoDrive:
         self.steering_sign = -1.0
 
         # =====================================================
-        # Threshold steering mode
+        # Dynamic steering response
         # =====================================================
-        # 오차가 이 값보다 작으면 새 조향을 하지 않음
-        self.turn_start_error_px = 45.0
+        self.near_error_px = 10.0
+        self.far_error_px = 70.0
 
-        # 조향 중이었다가 오차가 이 값보다 작아지면 조향 해제
-        self.turn_release_error_px = 18.0
+        self.min_center_gain = 0.22
+        self.max_center_gain = 0.90
 
-        # 작은 오차 구간에서 이전 핸들 각도 감쇠
-        # 1.0이면 완전 유지, 0.90이면 서서히 직진 복귀
-        self.small_error_angle_decay = 0.90
+        self.dead_zone_px = 3.0
 
-        # 큰 오차에서 조향 강도
-        self.threshold_turn_gain = 0.95
+        self.near_smoothing_alpha = 0.45
+        self.far_smoothing_alpha = 0.10
 
-        # 큰 오차에서 최소 조향각
-        self.min_turn_angle = 18.0
-
-        # 큰 오차에서 smoothing
-        # 작을수록 즉시 꺾음
-        self.turn_smoothing_alpha = 0.08
-
-        # 현재 강제 조향 상태
-        self.correction_active = False
+        self.prev_angle = 0.0
 
         # =====================================================
         # White threshold
@@ -190,7 +190,6 @@ class AutoDrive:
             self.right_available = False
             self.using_prediction = False
             self.holding_angle = True
-            self.correction_active = False
 
             self.last_left_x = None
             self.last_right_x = None
@@ -250,10 +249,32 @@ class AutoDrive:
             control_error = center_error + self.heading_gain * heading_error
             self.last_control_error = control_error
 
-            # =================================================
-            # 작은 오차는 유지, 큰 오차만 강하게 조향
-            # =================================================
-            self.angle = self.compute_threshold_steering(control_error)
+            dynamic_gain, dynamic_smoothing = self.get_dynamic_response(
+                control_error
+            )
+
+            raw_angle = (
+                self.steering_sign
+                * dynamic_gain
+                * control_error
+            )
+
+            raw_angle = self.clamp(
+                raw_angle,
+                -self.max_angle,
+                self.max_angle
+            )
+
+            smoothed_angle = (
+                dynamic_smoothing * self.prev_angle
+                + (1.0 - dynamic_smoothing) * raw_angle
+            )
+
+            self.angle = self.clamp(
+                smoothed_angle,
+                -self.max_angle,
+                self.max_angle
+            )
 
             self.prev_angle = self.angle
             self.speed = self.drive_speed
@@ -261,72 +282,38 @@ class AutoDrive:
         if self.show_debug:
             self.show_debug_view()
 
-        return float(self.angle), float(self.speed)
+        return self.angle, self.speed
 
     # =====================================================
-    # Threshold steering
+    # Dynamic response
     # =====================================================
 
-    def compute_threshold_steering(self, control_error):
+    def get_dynamic_response(self, control_error):
         abs_error = abs(control_error)
 
-        # =====================================================
-        # 1. 조향 상태 ON/OFF 판단
-        # =====================================================
-        if self.correction_active:
-            # 이미 조향 중이면 오차가 충분히 작아질 때까지 유지
-            if abs_error <= self.turn_release_error_px:
-                self.correction_active = False
-        else:
-            # 오차가 충분히 커졌을 때만 조향 시작
-            if abs_error >= self.turn_start_error_px:
-                self.correction_active = True
+        if abs_error < self.dead_zone_px:
+            return 0.0, self.near_smoothing_alpha
 
-        # =====================================================
-        # 2. 오차가 작으면 새 조향을 하지 않음
-        # =====================================================
-        if not self.correction_active:
-            keep_angle = self.prev_angle * self.small_error_angle_decay
+        error_ratio = (
+            (abs_error - self.near_error_px)
+            / (self.far_error_px - self.near_error_px)
+        )
 
-            return self.clamp(
-                keep_angle,
-                -self.max_angle,
-                self.max_angle
+        error_ratio = self.clamp(error_ratio, 0.0, 1.0)
+
+        dynamic_gain = (
+            self.min_center_gain
+            + error_ratio * (self.max_center_gain - self.min_center_gain)
+        )
+
+        dynamic_smoothing = (
+            self.near_smoothing_alpha
+            - error_ratio * (
+                self.near_smoothing_alpha - self.far_smoothing_alpha
             )
-
-        # =====================================================
-        # 3. 오차가 크면 강하게 조향
-        # =====================================================
-        raw_angle = (
-            self.steering_sign
-            * self.threshold_turn_gain
-            * control_error
         )
 
-        # 큰 오차인데 조향각이 너무 작게 나오는 것 방지
-        if abs(raw_angle) < self.min_turn_angle:
-            if raw_angle > 0:
-                raw_angle = self.min_turn_angle
-            elif raw_angle < 0:
-                raw_angle = -self.min_turn_angle
-
-        raw_angle = self.clamp(
-            raw_angle,
-            -self.max_angle,
-            self.max_angle
-        )
-
-        # 큰 오차에서는 빠르게 반영
-        angle = (
-            self.turn_smoothing_alpha * self.prev_angle
-            + (1.0 - self.turn_smoothing_alpha) * raw_angle
-        )
-
-        return self.clamp(
-            angle,
-            -self.max_angle,
-            self.max_angle
-        )
+        return dynamic_gain, dynamic_smoothing
 
     # =====================================================
     # Bird's Eye View
@@ -776,6 +763,7 @@ class AutoDrive:
 
         lane_view = np.zeros((height, width, 3), dtype=np.uint8)
 
+        # 흰색 마스크만 표시
         if self.last_mask is not None and self.last_roi_y1 is not None:
             mask_h, mask_w = self.last_mask.shape[:2]
 
@@ -789,6 +777,7 @@ class AutoDrive:
         roi_y1 = int(height * self.roi_y_start_ratio)
         lookahead_y = int(height * self.lookahead_y_ratio)
 
+        # sliding windows
         for win_x_low, win_y_low, win_x_high, win_y_high, side in self.last_windows:
             color = (255, 0, 0) if side == "left" else (0, 255, 0)
 
@@ -800,6 +789,7 @@ class AutoDrive:
                 1
             )
 
+        # fit curves
         self.draw_fit_curve(
             lane_view,
             self.last_left_fit,
@@ -816,6 +806,7 @@ class AutoDrive:
             color=(0, 255, 0)
         )
 
+        # 차량 중심선
         target_x = int(width * self.target_center_x_ratio)
 
         cv2.line(
@@ -826,6 +817,7 @@ class AutoDrive:
             2
         )
 
+        # 계산된 차선 중앙선
         if self.last_center_x is not None:
             cx = int(self.clamp(self.last_center_x, 0, width - 1))
 
@@ -845,6 +837,7 @@ class AutoDrive:
                 -1
             )
 
+        # left / right lookahead point
         if self.last_left_x is not None:
             lx = int(self.clamp(self.last_left_x, 0, width - 1))
             cv2.circle(
@@ -892,6 +885,10 @@ class AutoDrive:
                 color=color,
                 thickness=3
             )
+
+    # =====================================================
+    # Logger intentionally disabled
+    # =====================================================
 
     def log_info(self, msg):
         pass
