@@ -49,7 +49,7 @@ class AutoDrive:
         # 오른쪽 흰색 선을 화면의 몇 % 지점에 유지할지 결정.
         # 값이 클수록 오른쪽 선을 화면 오른쪽에 두려고 함.
         # 일반 추천: 0.72 ~ 0.85
-        self.target_right_line_x_ratio = 0.78
+        self.target_right_line_x_ratio = 0.82
 
         # 차선 x 위치를 계산할 기준 y 위치.
         # 0.85면 화면 아래쪽 85% 높이에서 차선 x를 계산.
