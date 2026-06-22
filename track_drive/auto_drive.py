@@ -38,7 +38,7 @@ class YellowLineFollower:
         self.kp_slope = 0.65
 
         # 조향 방향이 반대로 움직이면 -1.0으로 변경
-        self.steer_sign = 1.0
+        self.steer_sign = -1.0
 
         # =====================================================
         # Vehicle center parameters
