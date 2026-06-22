@@ -16,8 +16,7 @@ class AutoDrive:
         3. 이후 Bird's Eye View 기반 노란색 점선 추종
         4. 노란색 점선이 끊기면 이전 직선 모델로 잠깐 예측
         5. 예측도 끝났는데 노란선이 안 보이면 마지막 조향각 유지
-        6. 노란선이 다시 보이면 새로 피팅해서 주행
-        7. 오차가 크면 강하게, 오차가 작으면 부드럽게 반응
+        6. 코너에서는 더 일찍 반응하고 속도를 낮춤
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -42,88 +41,81 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
-        # 노란선이 보일 때 속도
         self.line_detected_speed = 6.0
-
-        # 점선이 끊겨서 예측으로 갈 때 속도
         self.prediction_speed = 5.0
-
-        # 노란선도 예측도 안 될 때, 마지막 각도 유지하면서 천천히 주행
         self.no_line_speed = 4.0
 
-        # 최대 조향각
+        self.corner_medium_speed = 5.0
+        self.corner_strong_speed = 4.5
+
         self.max_angle = 100.0
 
         # =====================================================
         # Control parameters
         # =====================================================
-        # 차량 기준 중심. 화면 중앙.
         self.target_center_x_ratio = 0.50
 
-        # Bird's Eye View 기준으로 어느 y 지점의 노란선을 따라갈지.
-        # 작을수록 멀리 보고, 클수록 가까운 곳을 본다.
-        self.lookahead_y_ratio = 0.78
+        # 기존 0.78 -> 0.62
+        # 더 먼 지점을 봐서 코너에 일찍 반응
+        self.lookahead_y_ratio = 0.62
 
-        # 가까운 지점. 선의 진행 방향 예측용.
-        self.near_y_ratio = 0.95
+        # 기존 0.95 -> 0.88
+        self.near_y_ratio = 0.88
 
-        # 기울기 기반 예측 보정 게인
-        self.heading_gain = 0.30
+        # 기존 0.30 -> 0.50
+        # 선의 기울기 반영 강화
+        self.heading_gain = 0.50
 
-        # 조향 방향 보정.
-        # 차가 반대로 꺾이면 -1.0을 1.0으로 바꾸면 된다.
+        # 차가 반대로 꺾이면 1.0으로 변경
         self.steering_sign = -1.0
 
         # =====================================================
         # Dynamic response parameters
         # =====================================================
-        # 오차가 이 값보다 작으면 거의 맞았다고 보고 약하게 반응
-        self.near_error_px = 20.0
+        # 기존 20 -> 10
+        self.near_error_px = 10.0
 
-        # 오차가 이 값보다 크면 강하게 반응
-        self.far_error_px = 120.0
+        # 기존 120 -> 80
+        self.far_error_px = 80.0
 
-        # 가까울 때 조향 gain
-        self.min_center_gain = 0.14
+        # 기존 0.14 -> 0.18
+        self.min_center_gain = 0.18
 
-        # 멀 때 조향 gain
-        self.max_center_gain = 0.55
+        # 기존 0.55 -> 0.70
+        self.max_center_gain = 0.70
 
-        # 작은 오차 무시 구간
-        self.dead_zone_px = 5.0
+        # 기존 5 -> 3
+        self.dead_zone_px = 3.0
 
-        # 가까울 때 smoothing: 부드럽고 천천히 반응
-        self.near_smoothing_alpha = 0.75
+        # 기존 0.75 -> 0.60
+        self.near_smoothing_alpha = 0.60
 
-        # 멀 때 smoothing: 빠르게 반응
-        self.far_smoothing_alpha = 0.30
+        # 기존 0.30 -> 0.18
+        self.far_smoothing_alpha = 0.18
 
         self.last_dynamic_gain = 0.0
         self.last_dynamic_smoothing = 0.0
 
-        # 이전 조향값
         self.prev_angle = 0.0
 
         # =====================================================
         # ROI parameters
         # =====================================================
-        # Bird's Eye View 화면 아래 절반만 사용
-        self.roi_y_start_ratio = 0.50
+        # 기존 0.50 -> 0.42
+        # 도로의 더 먼 부분까지 사용해서 코너를 일찍 봄
+        self.roi_y_start_ratio = 0.42
 
         # =====================================================
         # Yellow color threshold
         # =====================================================
-        # Unity 시뮬 노란색 점선 기준
         self.yellow_lower = np.array([15, 70, 90])
         self.yellow_upper = np.array([40, 255, 255])
 
-        # 노란색 픽셀 최소 개수
         self.min_yellow_pixels = 80
 
         # =====================================================
         # Prediction parameters
         # =====================================================
-        # 점선이 끊겼을 때 이전 직선 모델을 유지할 최대 프레임 수
         self.max_prediction_frames = 10
         self.prediction_count = 0
 
@@ -173,10 +165,7 @@ class AutoDrive:
             "AutoDrive started: "
             "0.5s angle=10 speed=8 -> "
             "1.0s angle=0 speed=8 -> "
-            "yellow dashed line follow "
-            f"| line_speed:{self.line_detected_speed:.1f} "
-            f"| prediction_speed:{self.prediction_speed:.1f} "
-            f"| no_line_speed:{self.no_line_speed:.1f}"
+            "early corner yellow dashed line follow"
         )
 
     def stop(self):
@@ -227,7 +216,6 @@ class AutoDrive:
             self.holding_angle = False
 
             self.print_initial_log(elapsed_time, "FIRST TURN")
-
             return self.angle, self.speed
 
         elif elapsed_time < self.first_duration + self.forward_duration:
@@ -241,7 +229,6 @@ class AutoDrive:
             self.holding_angle = False
 
             self.print_initial_log(elapsed_time, "GO STRAIGHT")
-
             return self.angle, self.speed
 
         self.initial_mode = False
@@ -263,8 +250,6 @@ class AutoDrive:
         result = self.detect_yellow_line(image)
 
         if result is None:
-            # 노란선도 없고 예측도 불가능하면
-            # angle=0으로 풀지 않고 마지막 조향각 유지
             self.line_detected = False
             self.using_prediction = False
             self.holding_angle = True
@@ -279,7 +264,7 @@ class AutoDrive:
             self.last_dynamic_gain = 0.0
             self.last_dynamic_smoothing = 0.0
 
-            # 핵심: 마지막 조향각 유지
+            # 노란선도 예측도 없으면 마지막 각도 유지
             self.angle = self.prev_angle
             self.speed = self.no_line_speed
 
@@ -306,7 +291,6 @@ class AutoDrive:
             control_error = center_error + self.heading_gain * heading_error
             self.last_control_error = control_error
 
-            # 오차 크기에 따라 gain / smoothing 동적 조절
             dynamic_gain, dynamic_smoothing = self.get_dynamic_response(
                 control_error
             )
@@ -337,8 +321,16 @@ class AutoDrive:
                 self.max_angle
             )
 
+            # 코너에서 속도 낮추기
+            abs_control_error = abs(control_error)
+
             if detected_now:
-                self.speed = self.line_detected_speed
+                if abs_control_error > 70.0:
+                    self.speed = self.corner_strong_speed
+                elif abs_control_error > 40.0:
+                    self.speed = self.corner_medium_speed
+                else:
+                    self.speed = self.line_detected_speed
             else:
                 self.speed = self.prediction_speed
 
@@ -358,7 +350,6 @@ class AutoDrive:
     def get_dynamic_response(self, control_error):
         abs_error = abs(control_error)
 
-        # 너무 작은 오차는 무시해서 좌우 떨림 방지
         if abs_error < self.dead_zone_px:
             return 0.0, self.near_smoothing_alpha
 
@@ -369,13 +360,11 @@ class AutoDrive:
 
         error_ratio = self.clamp(error_ratio, 0.0, 1.0)
 
-        # 오차가 크면 gain 크게
         dynamic_gain = (
             self.min_center_gain
             + error_ratio * (self.max_center_gain - self.min_center_gain)
         )
 
-        # 오차가 크면 smoothing 작게 해서 빠르게 반응
         dynamic_smoothing = (
             self.near_smoothing_alpha
             - error_ratio * (
@@ -390,9 +379,6 @@ class AutoDrive:
     # =====================================================
 
     def warp_image(self, img):
-        """
-        전방 카메라 이미지를 Bird's Eye View로 변환.
-        """
         h, w = img.shape[:2]
 
         src = np.float32([
@@ -437,7 +423,6 @@ class AutoDrive:
 
         yellow_mask = self.create_yellow_mask(roi)
 
-        # 점선 노이즈 정리
         open_kernel = np.ones((3, 3), np.uint8)
         close_kernel = np.ones((9, 9), np.uint8)
 
@@ -465,7 +450,6 @@ class AutoDrive:
         fit = None
 
         if detected_now:
-            # ROI 좌표를 전체 warped 이미지 좌표로 변환
             full_ys = ys + roi_y1
             full_xs = xs
 
@@ -488,7 +472,7 @@ class AutoDrive:
                 fit = None
 
         else:
-            # 점선이 끊겨서 현재 프레임에서 노란색이 부족하면 이전 모델로 예측
+            # 점선이 끊기면 이전 직선 모델로 예측
             if (
                 self.last_fit is not None
                 and self.prediction_count < self.max_prediction_frames
@@ -497,8 +481,6 @@ class AutoDrive:
                 self.prediction_count += 1
                 detected_now = False
             else:
-                # 예측 프레임을 넘겨도 last_fit은 지우지 않는다.
-                # process()에서 마지막 조향각을 유지한다.
                 self.prediction_count = self.max_prediction_frames
                 return None
 
@@ -514,7 +496,6 @@ class AutoDrive:
         line_x = a * lookahead_y + b
         near_x = a * near_y + b
 
-        # 예측값이 화면을 너무 벗어나면 폐기
         if line_x < -width * 0.25 or line_x > width * 1.25:
             return None
 
@@ -563,7 +544,6 @@ class AutoDrive:
         lookahead_y = int(height * self.lookahead_y_ratio)
         near_y = int(height * self.near_y_ratio)
 
-        # ROI 표시
         cv2.rectangle(
             warped_debug,
             (0, roi_y1),
@@ -572,7 +552,6 @@ class AutoDrive:
             2
         )
 
-        # lookahead / near 라인 표시
         cv2.line(
             warped_debug,
             (0, lookahead_y),
@@ -589,7 +568,6 @@ class AutoDrive:
             2
         )
 
-        # 목표 차량 중심선
         if self.last_target_x is not None:
             target_x = int(self.last_target_x)
         else:
@@ -611,7 +589,6 @@ class AutoDrive:
             -1
         )
 
-        # 예측된 노란선 위치
         if self.last_line_x is not None:
             line_x = int(self.last_line_x)
 
@@ -642,7 +619,6 @@ class AutoDrive:
                 -1
             )
 
-        # 피팅된 직선 표시
         if self.last_fit is not None:
             a = float(self.last_fit[0])
             b = float(self.last_fit[1])
@@ -664,7 +640,6 @@ class AutoDrive:
                 4
             )
 
-        # 상태 표시
         if self.holding_angle:
             status = "NO LINE - HOLD ANGLE"
             status_color = (0, 0, 255)
@@ -749,7 +724,6 @@ class AutoDrive:
                 2
             )
 
-        # 마스크 표시용 전체 이미지 생성
         mask_view = np.zeros((height, width), dtype=np.uint8)
 
         if self.last_mask is not None and self.last_roi_y1 is not None:
@@ -761,7 +735,6 @@ class AutoDrive:
 
         mask_color = cv2.cvtColor(mask_view, cv2.COLOR_GRAY2BGR)
 
-        # 4분할 디버그 화면
         view_w = 320
         view_h = 240
 
