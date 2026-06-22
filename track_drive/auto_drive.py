@@ -35,8 +35,8 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
-        self.line_detected_speed = 16.0
-        self.no_line_speed = 8.0
+        self.line_detected_speed = 6.0
+        self.no_line_speed = 6.0
         self.max_angle = 100.0
 
         # 차선을 못 찾았을 때 탐색 조향각.
