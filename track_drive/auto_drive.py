@@ -70,22 +70,22 @@ class AutoDrive:
         # Dynamic response parameters
         # =====================================================
         # 오차가 이 값보다 작으면 거의 맞았다고 보고 약하게 반응
-        self.near_error_px = 20.0
+        self.near_error_px = 15.0
 
         # 오차가 이 값보다 크면 강하게 반응
-        self.far_error_px = 120.0
+        self.far_error_px = 90.0
 
         # 가까울 때 조향 gain
-        self.min_center_gain = 0.14
+        self.min_center_gain = 0.18
 
         # 멀 때 조향 gain
-        self.max_center_gain = 0.55
+        self.max_center_gain = 0.75
 
         # 작은 오차 무시 구간
         self.dead_zone_px = 5.0
 
         # 가까울 때 smoothing: 부드럽고 천천히 반응
-        self.near_smoothing_alpha = 0.75
+        self.near_smoothing_alpha = 0.65
 
         # 멀 때 smoothing: 빠르게 반응
         self.far_smoothing_alpha = 0.30
