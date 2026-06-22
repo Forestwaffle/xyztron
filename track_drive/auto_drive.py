@@ -20,6 +20,7 @@ class AutoDrive:
         5. 노란색 점선이 끊기면 이전 직선 모델로 잠깐 예측
         6. lookahead_y 위치에서 노란선의 예상 x 좌표 계산
         7. 차량 중심과 노란선 x 좌표 오차로 조향
+        8. 오차가 크면 강하게 반응하고, 오차가 작으면 부드럽게 반응한다.
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -33,43 +34,66 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
-        # 천천히 주행
+        # 노란선이 보일 때 속도
         self.line_detected_speed = 6.0
 
-        # 점선이 잠깐 끊겨서 예측으로 갈 때 속도
+        # 점선이 끊겨서 예측으로 갈 때 속도
         self.prediction_speed = 5.0
 
         # 노란선도 예측도 안 될 때 직진 속도
         self.no_line_speed = 4.0
 
+        # 최대 조향각
         self.max_angle = 80.0
 
         # =====================================================
         # Control parameters
         # =====================================================
-        # 차량 중심 목표. 화면 중앙.
+        # 차량 기준 중심. 화면 중앙.
         self.target_center_x_ratio = 0.50
 
         # Bird's Eye View 기준으로 어느 y 지점의 노란선을 따라갈지.
-        # 0.78이면 아래쪽보다 조금 앞을 봄.
+        # 작을수록 멀리 보고, 클수록 가까운 곳을 본다.
         self.lookahead_y_ratio = 0.78
 
         # 가까운 지점. 선의 진행 방향 예측용.
         self.near_y_ratio = 0.95
 
-        # 중심 오차 조향 게인.
-        self.center_gain = 0.22
-
-        # 기울기 예측 보정 게인.
+        # 기울기 기반 예측 보정 게인.
         self.heading_gain = 0.30
 
         # 조향 방향 보정.
-        # 차가 반대로 꺾이면 -1.0을 1.0으로 바꾸면 됨.
+        # 차가 반대로 꺾이면 -1.0을 1.0으로 바꾸면 된다.
         self.steering_sign = -1.0
 
-        # 조향 smoothing.
-        # 값이 클수록 부드럽지만 반응이 느림.
-        self.smoothing_alpha = 0.70
+        # =====================================================
+        # Dynamic response parameters
+        # =====================================================
+        # 오차가 이 값보다 작으면 거의 맞았다고 보고 약하게 반응
+        self.near_error_px = 20.0
+
+        # 오차가 이 값보다 크면 강하게 반응
+        self.far_error_px = 120.0
+
+        # 가까울 때 조향 gain
+        self.min_center_gain = 0.10
+
+        # 멀 때 조향 gain
+        self.max_center_gain = 0.38
+
+        # 작은 오차 무시 구간
+        self.dead_zone_px = 5.0
+
+        # 가까울 때 smoothing: 부드럽고 천천히 반응
+        self.near_smoothing_alpha = 0.82
+
+        # 멀 때 smoothing: 빠르게 반응
+        self.far_smoothing_alpha = 0.45
+
+        self.last_dynamic_gain = 0.0
+        self.last_dynamic_smoothing = 0.0
+
+        # 이전 조향값
         self.prev_angle = 0.0
 
         # =====================================================
@@ -116,6 +140,7 @@ class AutoDrive:
         self.last_target_x = None
         self.last_error = None
         self.last_heading_error = None
+        self.last_control_error = None
         self.last_pixel_count = 0
 
         self.last_warped = None
@@ -180,7 +205,10 @@ class AutoDrive:
             self.last_target_x = None
             self.last_error = None
             self.last_heading_error = None
+            self.last_control_error = None
             self.last_pixel_count = 0
+            self.last_dynamic_gain = 0.0
+            self.last_dynamic_smoothing = 0.0
 
             self.angle = 0.0
             self.speed = self.no_line_speed
@@ -202,15 +230,23 @@ class AutoDrive:
             self.last_error = center_error
 
             # 기울기 기반 예측 오차
-            # near_x와 lookahead line_x 차이를 이용해서 선의 방향성을 반영
             heading_error = near_x - line_x
             self.last_heading_error = heading_error
 
             control_error = center_error + self.heading_gain * heading_error
+            self.last_control_error = control_error
+
+            # 오차 크기에 따라 gain / smoothing 동적 조절
+            dynamic_gain, dynamic_smoothing = self.get_dynamic_response(
+                control_error
+            )
+
+            self.last_dynamic_gain = dynamic_gain
+            self.last_dynamic_smoothing = dynamic_smoothing
 
             raw_angle = (
                 self.steering_sign
-                * self.center_gain
+                * dynamic_gain
                 * control_error
             )
 
@@ -221,8 +257,8 @@ class AutoDrive:
             )
 
             smoothed_angle = (
-                self.smoothing_alpha * self.prev_angle
-                + (1.0 - self.smoothing_alpha) * raw_angle
+                dynamic_smoothing * self.prev_angle
+                + (1.0 - dynamic_smoothing) * raw_angle
             )
 
             self.angle = self.clamp(
@@ -246,13 +282,46 @@ class AutoDrive:
         return self.angle, self.speed
 
     # =====================================================
+    # Dynamic response
+    # =====================================================
+
+    def get_dynamic_response(self, control_error):
+        abs_error = abs(control_error)
+
+        # 너무 작은 오차는 무시해서 좌우 떨림 방지
+        if abs_error < self.dead_zone_px:
+            return 0.0, self.near_smoothing_alpha
+
+        error_ratio = (
+            (abs_error - self.near_error_px)
+            / (self.far_error_px - self.near_error_px)
+        )
+
+        error_ratio = self.clamp(error_ratio, 0.0, 1.0)
+
+        # 오차가 크면 gain 크게
+        dynamic_gain = (
+            self.min_center_gain
+            + error_ratio * (self.max_center_gain - self.min_center_gain)
+        )
+
+        # 오차가 크면 smoothing 작게 해서 빠르게 반응
+        dynamic_smoothing = (
+            self.near_smoothing_alpha
+            - error_ratio * (
+                self.near_smoothing_alpha - self.far_smoothing_alpha
+            )
+        )
+
+        return dynamic_gain, dynamic_smoothing
+
+    # =====================================================
     # Image warp
     # =====================================================
 
     def warp_image(self, img):
         """
         전방 카메라 이미지를 Bird's Eye View로 변환.
-        기존 네 코드에서 쓰던 방식과 유사한 사다리꼴 변환.
         """
         h, w = img.shape[:2]
 
@@ -569,9 +638,21 @@ class AutoDrive:
             cv2.putText(
                 warped_debug,
                 f"HEAD:{self.last_heading_error:.1f} "
-                f"PIXELS:{self.last_pixel_count} "
-                f"PRED:{self.prediction_count}",
+                f"CTRL:{self.last_control_error:.1f} "
+                f"PIX:{self.last_pixel_count}",
                 (20, 140),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2
+            )
+
+            cv2.putText(
+                warped_debug,
+                f"GAIN:{self.last_dynamic_gain:.3f} "
+                f"SMOOTH:{self.last_dynamic_smoothing:.2f} "
+                f"PRED:{self.prediction_count}",
+                (20, 170),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
                 (255, 255, 255),
@@ -583,11 +664,14 @@ class AutoDrive:
 
         if self.last_mask is not None and self.last_roi_y1 is not None:
             mask_h, mask_w = self.last_mask.shape[:2]
-            mask_view[self.last_roi_y1:self.last_roi_y1 + mask_h, 0:mask_w] = self.last_mask
+            mask_view[
+                self.last_roi_y1:self.last_roi_y1 + mask_h,
+                0:mask_w
+            ] = self.last_mask
 
         mask_color = cv2.cvtColor(mask_view, cv2.COLOR_GRAY2BGR)
 
-        # 3분할 디버그 화면
+        # 4분할 디버그 화면
         view_w = 320
         view_h = 240
 
@@ -627,12 +711,21 @@ class AutoDrive:
             else f"{self.last_error:.1f}"
         )
 
+        ctrl_text = (
+            "None"
+            if self.last_control_error is None
+            else f"{self.last_control_error:.1f}"
+        )
+
         self.log_info(
             f"AUTO_DRIVE | "
             f"detected:{self.line_detected} | "
             f"prediction:{self.using_prediction} | "
             f"line_x:{line_x_text} | "
             f"err:{err_text} | "
+            f"ctrl:{ctrl_text} | "
+            f"gain:{self.last_dynamic_gain:.3f} | "
+            f"smooth:{self.last_dynamic_smoothing:.2f} | "
             f"pixels:{self.last_pixel_count} | "
             f"angle:{self.angle:.2f} | "
             f"speed:{self.speed:.2f}"
