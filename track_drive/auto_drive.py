@@ -7,26 +7,29 @@ import numpy as np
 
 class AutoDrive:
     """
-    AUTO_DRIVE 상태에서 실행되는 노란색 점선 추종 로직.
+    AUTO_DRIVE 상태에서 실행되는 흰색 차선 중앙 추종 로직.
 
     목표:
-        차량 중심이 노란색 점선의 중심을 따라가도록 주행한다.
+        주변의 왼쪽/오른쪽 흰색 차선을 기준으로 차선 중앙을 계산하고,
+        차량 중심이 그 중앙으로 가도록 조향한다.
 
     방식:
         1. 전방 카메라 이미지를 Bird's Eye View로 변환
-        2. 화면 아래 절반 ROI만 사용
-        3. 노란색만 HSV로 검출
-        4. 노란색 픽셀을 x = a*y + b 직선으로 피팅
-        5. 노란색 점선이 끊기면 이전 직선 모델로 잠깐 예측
-        6. 예측도 끝났는데 노란선이 안 보이면 마지막 조향각 유지
-        7. 노란선이 다시 보이면 새로 피팅해서 주행
-        8. 오차가 크면 강하게, 오차가 작으면 부드럽게 반응
+        2. 아래쪽 ROI 사용
+        3. 흰색 차선만 HSV + BGR 밝기 조건으로 검출
+        4. 화면 중앙 기준 왼쪽/오른쪽 흰선 픽셀 분리
+        5. 왼쪽/오른쪽 흰선을 각각 2차 곡선으로 피팅
+        6. lookahead_y 위치에서 left_x, right_x 계산
+        7. lane_center = (left_x + right_x) / 2
+        8. 차량 중심과 lane_center 오차로 조향
+        9. 한쪽 선이 안 보이면 이전 차선 폭으로 반대쪽 예측
+        10. 둘 다 안 보이면 짧게 마지막 조향 유지 후 서서히 직진 복귀
     """
 
     def __init__(self, logger=None, show_debug=True):
         self.logger = logger
         self.show_debug = show_debug
-        self.window_name = "AUTO_DRIVE Yellow Dashed Line Follow"
+        self.window_name = "AUTO_DRIVE White Lane Center"
 
         # =====================================================
         # Drive parameters
@@ -34,96 +37,92 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
-        # 노란선이 보일 때 속도
-        self.line_detected_speed = 8.0
+        # 처음 테스트는 천천히
+        self.line_detected_speed = 6.0
+        self.prediction_speed = 4.5
+        self.no_line_speed = 3.5
 
-        # 점선이 끊겨서 예측으로 갈 때 속도
-        self.prediction_speed = 5.0
-
-        # 노란선도 예측도 안 될 때, 마지막 각도 유지하면서 천천히 주행
-        self.no_line_speed = 4.0
-
-        # 최대 조향각
         self.max_angle = 100.0
 
         # =====================================================
         # Control parameters
         # =====================================================
-        # 차량 기준 중심. 화면 중앙.
         self.target_center_x_ratio = 0.50
 
-        # Bird's Eye View 기준으로 어느 y 지점의 노란선을 따라갈지.
-        # 작을수록 멀리 보고, 클수록 가까운 곳을 본다.
-        self.lookahead_y_ratio = 0.78
+        # 동영상 분석 기준: 너무 아래만 보면 커브 반응이 늦어서 0.45 사용
+        self.roi_y_start_ratio = 0.45
 
-        # 가까운 지점. 선의 진행 방향 예측용.
+        # 작을수록 더 앞쪽을 봄
+        self.lookahead_y_ratio = 0.70
         self.near_y_ratio = 0.95
 
-        # 기울기 기반 예측 보정 게인
-        self.heading_gain = 0.30
+        # 중심선의 방향성 보정
+        self.heading_gain = 0.35
 
-        # 조향 방향 보정.
-        # 차가 반대로 꺾이면 -1.0을 1.0으로 바꾸면 된다.
+        # 조향 방향 보정
+        # 차가 반대로 꺾이면 -1.0을 1.0으로 바꿀 것
         self.steering_sign = -1.0
 
         # =====================================================
         # Dynamic response parameters
         # =====================================================
-        # 오차가 이 값보다 작으면 거의 맞았다고 보고 약하게 반응
+        # 반응 빠르게 + 오차 크면 강하게
         self.near_error_px = 10.0
+        self.far_error_px = 70.0
 
-        # 오차가 이 값보다 크면 강하게 반응
-        self.far_error_px = 80.0
+        self.min_center_gain = 0.22
+        self.max_center_gain = 0.85
 
-        # 가까울 때 조향 gain
-        self.min_center_gain = 0.24
-
-        # 멀 때 조향 gain
-        self.max_center_gain = 0.95
-
-        # 작은 오차 무시 구간
         self.dead_zone_px = 3.0
 
-        # 가까울 때 smoothing: 부드럽고 천천히 반응
-        self.near_smoothing_alpha = 0.45
-
-        # 멀 때 smoothing: 빠르게 반응
-        self.far_smoothing_alpha = 0.1
+        self.near_smoothing_alpha = 0.50
+        self.far_smoothing_alpha = 0.12
 
         self.last_dynamic_gain = 0.0
         self.last_dynamic_smoothing = 0.0
 
-        # 이전 조향값
         self.prev_angle = 0.0
 
         # =====================================================
-        # ROI parameters
+        # White lane threshold
         # =====================================================
-        # 화면 아래 절반만 사용
-        self.roi_y_start_ratio = 0.50
+        # 흰색 HSV 조건: 채도 낮고 밝기 높은 픽셀
+        self.white_lower = np.array([0, 0, 165])
+        self.white_upper = np.array([180, 85, 255])
+
+        # BGR 각 채널 최소 밝기
+        self.min_bgr_white = 145
+
+        # 픽셀 개수 조건
+        self.min_total_white_pixels = 120
+        self.min_side_pixels = 50
 
         # =====================================================
-        # Yellow color threshold
+        # Lane fit / prediction parameters
         # =====================================================
-        # Unity 시뮬 노란색 점선 기준
-        self.yellow_lower = np.array([15, 70, 90])
-        self.yellow_upper = np.array([40, 255, 255])
+        self.last_left_fit = None
+        self.last_right_fit = None
 
-        # 노란색 픽셀 최소 개수
-        self.min_yellow_pixels = 80
+        # 새 피팅 반영 비율.
+        # 0.45면 이전 45%, 새 검출 55%
+        self.fit_alpha = 0.45
 
-        # =====================================================
-        # Prediction parameters
-        # =====================================================
-        # 점선이 끊겼을 때 이전 직선 모델을 유지할 최대 프레임 수
-        self.max_prediction_frames = 10
-        self.prediction_count = 0
+        self.left_prediction_count = 0
+        self.right_prediction_count = 0
+        self.max_side_prediction_frames = 8
 
-        # 직선 모델: x = a*y + b
-        self.last_fit = None
+        # 차선 폭 추정
+        self.default_lane_width_ratio = 0.52
+        self.estimated_lane_width_px = None
+        self.lane_width_alpha = 0.80
 
-        # 새 직선 모델 smoothing
-        self.fit_alpha = 0.70
+        self.min_lane_width_ratio = 0.25
+        self.max_lane_width_ratio = 0.90
+
+        # 둘 다 안 보일 때 마지막 조향 유지 제한
+        self.hold_angle_count = 0
+        self.max_hold_angle_frames = 6
+        self.hold_angle_decay = 0.70
 
         # =====================================================
         # Debug / state
@@ -132,17 +131,25 @@ class AutoDrive:
         self.warned_no_image = False
         self.log_count = 0
 
-        self.line_detected = False
+        self.lane_available = False
+        self.left_available = False
+        self.right_available = False
         self.using_prediction = False
         self.holding_angle = False
 
-        self.last_line_x = None
-        self.last_near_x = None
+        self.last_left_x = None
+        self.last_right_x = None
+        self.last_center_x = None
+        self.last_center_near_x = None
         self.last_target_x = None
-        self.last_error = None
+
+        self.last_center_error = None
         self.last_heading_error = None
         self.last_control_error = None
-        self.last_pixel_count = 0
+
+        self.last_left_count = 0
+        self.last_right_count = 0
+        self.last_lane_width = None
 
         self.last_warped = None
         self.last_mask = None
@@ -158,7 +165,7 @@ class AutoDrive:
 
         self.started = True
         self.log_info(
-            "AutoDrive started: yellow dashed line follow "
+            "AutoDrive started: white lane center tracking "
             f"| line_speed:{self.line_detected_speed:.1f} "
             f"| prediction_speed:{self.prediction_speed:.1f} "
             f"| no_line_speed:{self.no_line_speed:.1f}"
@@ -194,53 +201,77 @@ class AutoDrive:
 
         self.warned_no_image = False
 
-        result = self.detect_yellow_line(image)
+        result = self.detect_white_lane_center(image)
 
         if result is None:
-            # 노란선도 없고 예측도 불가능하면
-            # angle=0으로 풀지 않고 마지막 조향각 유지
-            self.line_detected = False
+            # 둘 다 안 보이면 짧게 마지막 각도 유지 후 서서히 직진 복귀
+            self.lane_available = False
+            self.left_available = False
+            self.right_available = False
             self.using_prediction = False
             self.holding_angle = True
 
-            self.last_line_x = None
-            self.last_near_x = None
+            self.last_left_x = None
+            self.last_right_x = None
+            self.last_center_x = None
+            self.last_center_near_x = None
             self.last_target_x = None
-            self.last_error = None
+
+            self.last_center_error = None
             self.last_heading_error = None
             self.last_control_error = None
-            self.last_pixel_count = 0
             self.last_dynamic_gain = 0.0
             self.last_dynamic_smoothing = 0.0
 
-            # 핵심: 마지막 조향각 유지
-            self.angle = self.prev_angle
+            self.hold_angle_count += 1
+
+            if self.hold_angle_count <= self.max_hold_angle_frames:
+                self.angle = self.prev_angle
+            else:
+                self.angle = self.prev_angle * self.hold_angle_decay
+                self.prev_angle = self.angle
+
             self.speed = self.no_line_speed
 
         else:
-            line_x, near_x, target_x, detected_now, pixel_count = result
+            (
+                lane_center,
+                lane_center_near,
+                target_x,
+                center_error,
+                heading_error,
+                left_x,
+                right_x,
+                left_available,
+                right_available,
+                using_prediction,
+                left_count,
+                right_count
+            ) = result
 
-            self.line_detected = detected_now
-            self.using_prediction = not detected_now
+            self.hold_angle_count = 0
             self.holding_angle = False
 
-            self.last_line_x = line_x
-            self.last_near_x = near_x
+            self.lane_available = True
+            self.left_available = left_available
+            self.right_available = right_available
+            self.using_prediction = using_prediction
+
+            self.last_left_x = left_x
+            self.last_right_x = right_x
+            self.last_center_x = lane_center
+            self.last_center_near_x = lane_center_near
             self.last_target_x = target_x
-            self.last_pixel_count = pixel_count
 
-            # 차량 중심이 노란선 중심으로 가게 만드는 오차
-            center_error = target_x - line_x
-            self.last_error = center_error
-
-            # 기울기 기반 예측 오차
-            heading_error = near_x - line_x
+            self.last_center_error = center_error
             self.last_heading_error = heading_error
+
+            self.last_left_count = left_count
+            self.last_right_count = right_count
 
             control_error = center_error + self.heading_gain * heading_error
             self.last_control_error = control_error
 
-            # 오차 크기에 따라 gain / smoothing 동적 조절
             dynamic_gain, dynamic_smoothing = self.get_dynamic_response(
                 control_error
             )
@@ -271,10 +302,10 @@ class AutoDrive:
                 self.max_angle
             )
 
-            if detected_now:
-                self.speed = self.line_detected_speed
-            else:
+            if using_prediction:
                 self.speed = self.prediction_speed
+            else:
+                self.speed = self.line_detected_speed
 
             self.prev_angle = self.angle
 
@@ -292,7 +323,6 @@ class AutoDrive:
     def get_dynamic_response(self, control_error):
         abs_error = abs(control_error)
 
-        # 너무 작은 오차는 무시해서 좌우 떨림 방지
         if abs_error < self.dead_zone_px:
             return 0.0, self.near_smoothing_alpha
 
@@ -303,13 +333,11 @@ class AutoDrive:
 
         error_ratio = self.clamp(error_ratio, 0.0, 1.0)
 
-        # 오차가 크면 gain 크게
         dynamic_gain = (
             self.min_center_gain
             + error_ratio * (self.max_center_gain - self.min_center_gain)
         )
 
-        # 오차가 크면 smoothing 작게 해서 빠르게 반응
         dynamic_smoothing = (
             self.near_smoothing_alpha
             - error_ratio * (
@@ -324,9 +352,6 @@ class AutoDrive:
     # =====================================================
 
     def warp_image(self, img):
-        """
-        전방 카메라 이미지를 Bird's Eye View로 변환.
-        """
         h, w = img.shape[:2]
 
         src = np.float32([
@@ -355,10 +380,10 @@ class AutoDrive:
         return warped
 
     # =====================================================
-    # Yellow line detection / prediction
+    # White lane center detection
     # =====================================================
 
-    def detect_yellow_line(self, image):
+    def detect_white_lane_center(self, image):
         warped = self.warp_image(image)
 
         height, width = warped.shape[:2]
@@ -369,116 +394,305 @@ class AutoDrive:
         if roi.size == 0:
             return None
 
-        yellow_mask = self.create_yellow_mask(roi)
+        white_mask = self.create_white_mask(roi)
 
-        # 점선 노이즈 정리
         open_kernel = np.ones((3, 3), np.uint8)
-        close_kernel = np.ones((9, 9), np.uint8)
+        close_kernel = np.ones((7, 7), np.uint8)
 
-        yellow_mask = cv2.morphologyEx(
-            yellow_mask,
+        white_mask = cv2.morphologyEx(
+            white_mask,
             cv2.MORPH_OPEN,
             open_kernel
         )
 
-        yellow_mask = cv2.morphologyEx(
-            yellow_mask,
+        white_mask = cv2.morphologyEx(
+            white_mask,
             cv2.MORPH_CLOSE,
             close_kernel
         )
 
         self.last_warped = warped
-        self.last_mask = yellow_mask
+        self.last_mask = white_mask
         self.last_roi_y1 = roi_y1
 
-        ys, xs = yellow_mask.nonzero()
+        ys, xs = white_mask.nonzero()
 
-        pixel_count = len(xs)
-        detected_now = pixel_count >= self.min_yellow_pixels
+        if len(xs) < self.min_total_white_pixels:
+            # 픽셀이 너무 적으면 현재 프레임 검출 실패
+            return self.try_prediction_only(height, width)
 
-        fit = None
+        full_ys = ys + roi_y1
+        full_xs = xs
 
-        if detected_now:
-            # ROI 좌표를 전체 warped 이미지 좌표로 변환
-            full_ys = ys + roi_y1
-            full_xs = xs
+        split_x = int(width * 0.50)
 
+        left_filter = full_xs < split_x
+        right_filter = full_xs >= split_x
+
+        left_xs = full_xs[left_filter]
+        left_ys = full_ys[left_filter]
+
+        right_xs = full_xs[right_filter]
+        right_ys = full_ys[right_filter]
+
+        left_fit, left_current_detected = self.get_lane_fit(
+            left_xs,
+            left_ys,
+            side="left"
+        )
+
+        right_fit, right_current_detected = self.get_lane_fit(
+            right_xs,
+            right_ys,
+            side="right"
+        )
+
+        left_count = len(left_xs)
+        right_count = len(right_xs)
+
+        return self.compute_lane_center_from_fits(
+            left_fit,
+            right_fit,
+            left_current_detected,
+            right_current_detected,
+            left_count,
+            right_count,
+            height,
+            width
+        )
+
+    def try_prediction_only(self, height, width):
+        left_fit = None
+        right_fit = None
+
+        left_predicted = False
+        right_predicted = False
+
+        if (
+            self.last_left_fit is not None
+            and self.left_prediction_count < self.max_side_prediction_frames
+        ):
+            left_fit = self.last_left_fit
+            self.left_prediction_count += 1
+            left_predicted = True
+
+        if (
+            self.last_right_fit is not None
+            and self.right_prediction_count < self.max_side_prediction_frames
+        ):
+            right_fit = self.last_right_fit
+            self.right_prediction_count += 1
+            right_predicted = True
+
+        if left_fit is None and right_fit is None:
+            return None
+
+        return self.compute_lane_center_from_fits(
+            left_fit,
+            right_fit,
+            left_current_detected=False,
+            right_current_detected=False,
+            left_count=0,
+            right_count=0,
+            height=height,
+            width=width,
+            forced_prediction=(left_predicted or right_predicted)
+        )
+
+    def get_lane_fit(self, xs, ys, side):
+        current_detected = len(xs) >= self.min_side_pixels
+
+        if side == "left":
+            last_fit = self.last_left_fit
+        else:
+            last_fit = self.last_right_fit
+
+        if current_detected:
             try:
-                # 노란선 직선 피팅: x = a*y + b
-                new_fit = np.polyfit(full_ys, full_xs, 1)
+                new_fit = np.polyfit(ys, xs, 2)
 
-                if self.last_fit is None:
+                if last_fit is None:
                     fit = new_fit
                 else:
                     fit = (
-                        self.fit_alpha * self.last_fit
+                        self.fit_alpha * last_fit
                         + (1.0 - self.fit_alpha) * new_fit
                     )
 
-                self.last_fit = fit
-                self.prediction_count = 0
+                if side == "left":
+                    self.last_left_fit = fit
+                    self.left_prediction_count = 0
+                else:
+                    self.last_right_fit = fit
+                    self.right_prediction_count = 0
+
+                return fit, True
 
             except Exception:
-                fit = None
+                pass
+
+        # 현재 프레임에서 못 찾으면 이전 fit으로 잠깐 예측
+        if side == "left":
+            if (
+                self.last_left_fit is not None
+                and self.left_prediction_count < self.max_side_prediction_frames
+            ):
+                self.left_prediction_count += 1
+                return self.last_left_fit, False
 
         else:
-            # 점선이 끊겨서 현재 프레임에서 노란색이 부족하면 이전 모델로 예측
             if (
-                self.last_fit is not None
-                and self.prediction_count < self.max_prediction_frames
+                self.last_right_fit is not None
+                and self.right_prediction_count < self.max_side_prediction_frames
             ):
-                fit = self.last_fit
-                self.prediction_count += 1
-                detected_now = False
-            else:
-                # 예측 프레임을 넘겨도 last_fit은 지우지 않는다.
-                # process()에서 마지막 조향각을 유지한다.
-                self.prediction_count = self.max_prediction_frames
-                return None
+                self.right_prediction_count += 1
+                return self.last_right_fit, False
 
-        if fit is None:
-            return None
+        return None, False
 
-        a = float(fit[0])
-        b = float(fit[1])
-
+    def compute_lane_center_from_fits(
+        self,
+        left_fit,
+        right_fit,
+        left_current_detected,
+        right_current_detected,
+        left_count,
+        right_count,
+        height,
+        width,
+        forced_prediction=False
+    ):
         lookahead_y = int(height * self.lookahead_y_ratio)
         near_y = int(height * self.near_y_ratio)
 
-        line_x = a * lookahead_y + b
-        near_x = a * near_y + b
+        left_x = None
+        right_x = None
+        left_x_near = None
+        right_x_near = None
 
-        # 예측값이 화면을 너무 벗어나면 폐기
-        if line_x < -width * 0.25 or line_x > width * 1.25:
+        if left_fit is not None:
+            left_x = self.eval_poly(left_fit, lookahead_y)
+            left_x_near = self.eval_poly(left_fit, near_y)
+
+            if not self.is_reasonable_x(left_x, width):
+                left_x = None
+                left_x_near = None
+
+        if right_fit is not None:
+            right_x = self.eval_poly(right_fit, lookahead_y)
+            right_x_near = self.eval_poly(right_fit, near_y)
+
+            if not self.is_reasonable_x(right_x, width):
+                right_x = None
+                right_x_near = None
+
+        left_available = left_x is not None
+        right_available = right_x is not None
+
+        if not left_available and not right_available:
             return None
 
-        if near_x < -width * 0.25 or near_x > width * 1.25:
-            return None
+        # 양쪽 차선이 모두 보이면 차선 폭 업데이트
+        if left_available and right_available:
+            measured_width = right_x - left_x
 
-        line_x = self.clamp(line_x, 0.0, float(width - 1))
-        near_x = self.clamp(near_x, 0.0, float(width - 1))
+            min_width = width * self.min_lane_width_ratio
+            max_width = width * self.max_lane_width_ratio
+
+            if min_width <= measured_width <= max_width:
+                if self.estimated_lane_width_px is None:
+                    self.estimated_lane_width_px = measured_width
+                else:
+                    self.estimated_lane_width_px = (
+                        self.lane_width_alpha * self.estimated_lane_width_px
+                        + (1.0 - self.lane_width_alpha) * measured_width
+                    )
+
+                self.last_lane_width = self.estimated_lane_width_px
+
+        lane_width = self.get_lane_width_estimate(width)
+
+        # 한쪽만 보이면 이전 차선 폭으로 반대쪽 예측
+        if left_available and not right_available:
+            right_x = left_x + lane_width
+            right_x_near = left_x_near + lane_width
+            right_available = True
+
+        elif right_available and not left_available:
+            left_x = right_x - lane_width
+            left_x_near = right_x_near - lane_width
+            left_available = True
+
+        lane_center = (left_x + right_x) / 2.0
+        lane_center_near = (left_x_near + right_x_near) / 2.0
 
         target_x = width * self.target_center_x_ratio
 
-        return (
-            float(line_x),
-            float(near_x),
-            float(target_x),
-            detected_now,
-            int(pixel_count)
+        center_error = target_x - lane_center
+        heading_error = lane_center_near - lane_center
+
+        using_prediction = (
+            forced_prediction
+            or not left_current_detected
+            or not right_current_detected
         )
 
-    def create_yellow_mask(self, image):
+        return (
+            float(lane_center),
+            float(lane_center_near),
+            float(target_x),
+            float(center_error),
+            float(heading_error),
+            float(left_x),
+            float(right_x),
+            left_available,
+            right_available,
+            using_prediction,
+            int(left_count),
+            int(right_count)
+        )
+
+    def create_white_mask(self, image):
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         hsv = cv2.GaussianBlur(hsv, (5, 5), 0)
 
-        yellow_mask = cv2.inRange(
+        hsv_white_mask = cv2.inRange(
             hsv,
-            self.yellow_lower,
-            self.yellow_upper
+            self.white_lower,
+            self.white_upper
         )
 
-        return yellow_mask
+        b, g, r = cv2.split(image)
+        min_channel = cv2.min(cv2.min(b, g), r)
+
+        bgr_white_mask = cv2.inRange(
+            min_channel,
+            self.min_bgr_white,
+            255
+        )
+
+        white_mask = cv2.bitwise_and(
+            hsv_white_mask,
+            bgr_white_mask
+        )
+
+        return white_mask
+
+    # =====================================================
+    # Utility for lane model
+    # =====================================================
+
+    def eval_poly(self, fit, y):
+        return float(fit[0] * y * y + fit[1] * y + fit[2])
+
+    def is_reasonable_x(self, x, width):
+        return -0.25 * width <= x <= 1.25 * width
+
+    def get_lane_width_estimate(self, width):
+        if self.estimated_lane_width_px is not None:
+            return self.estimated_lane_width_px
+
+        return width * self.default_lane_width_ratio
 
     # =====================================================
     # Debug view
@@ -497,7 +711,7 @@ class AutoDrive:
         lookahead_y = int(height * self.lookahead_y_ratio)
         near_y = int(height * self.near_y_ratio)
 
-        # ROI 표시
+        # ROI
         cv2.rectangle(
             warped_debug,
             (0, roi_y1),
@@ -506,7 +720,17 @@ class AutoDrive:
             2
         )
 
-        # lookahead / near 라인 표시
+        # 화면 중심
+        target_x = int(width * self.target_center_x_ratio)
+        cv2.line(
+            warped_debug,
+            (target_x, roi_y1),
+            (target_x, height),
+            (255, 255, 255),
+            2
+        )
+
+        # lookahead / near
         cv2.line(
             warped_debug,
             (0, lookahead_y),
@@ -523,91 +747,74 @@ class AutoDrive:
             2
         )
 
-        # 목표 차량 중심선
-        if self.last_target_x is not None:
-            target_x = int(self.last_target_x)
+        # 왼쪽/오른쪽 fit 곡선
+        self.draw_fit_curve(
+            warped_debug,
+            self.last_left_fit,
+            roi_y1,
+            height,
+            color=(255, 0, 0)
+        )
 
-            cv2.line(
-                warped_debug,
-                (target_x, roi_y1),
-                (target_x, height),
-                (255, 255, 255),
-                2
-            )
+        self.draw_fit_curve(
+            warped_debug,
+            self.last_right_fit,
+            roi_y1,
+            height,
+            color=(0, 255, 0)
+        )
 
+        # left/right/center point
+        if self.last_left_x is not None:
+            lx = int(self.clamp(self.last_left_x, 0, width - 1))
             cv2.circle(
                 warped_debug,
-                (target_x, lookahead_y),
+                (lx, lookahead_y),
                 8,
-                (255, 255, 255),
+                (255, 0, 0),
                 -1
             )
 
-        # 예측된 노란선 위치
-        if self.last_line_x is not None:
-            line_x = int(self.last_line_x)
+        if self.last_right_x is not None:
+            rx = int(self.clamp(self.last_right_x, 0, width - 1))
+            cv2.circle(
+                warped_debug,
+                (rx, lookahead_y),
+                8,
+                (0, 255, 0),
+                -1
+            )
+
+        if self.last_center_x is not None:
+            cx = int(self.clamp(self.last_center_x, 0, width - 1))
 
             cv2.line(
                 warped_debug,
-                (line_x, roi_y1),
-                (line_x, height),
-                (0, 255, 255),
+                (cx, roi_y1),
+                (cx, height),
+                (0, 0, 255),
                 2
             )
 
             cv2.circle(
                 warped_debug,
-                (line_x, lookahead_y),
+                (cx, lookahead_y),
                 10,
-                (0, 255, 255),
+                (0, 0, 255),
                 -1
             )
 
-        if self.last_near_x is not None:
-            near_x = int(self.last_near_x)
-
-            cv2.circle(
-                warped_debug,
-                (near_x, near_y),
-                8,
-                (0, 180, 255),
-                -1
-            )
-
-        # 피팅된 직선 표시
-        if self.last_fit is not None:
-            a = float(self.last_fit[0])
-            b = float(self.last_fit[1])
-
-            y1 = roi_y1
-            y2 = height - 1
-
-            x1 = int(a * y1 + b)
-            x2 = int(a * y2 + b)
-
-            x1 = int(self.clamp(x1, 0, width - 1))
-            x2 = int(self.clamp(x2, 0, width - 1))
-
-            cv2.line(
-                warped_debug,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 255),
-                4
-            )
-
-        # 상태 표시
         if self.holding_angle:
-            status = "NO LINE - HOLD ANGLE"
+            status = "NO WHITE LANES - HOLD/DECAY"
             status_color = (0, 0, 255)
         elif self.using_prediction:
-            status = "YELLOW PREDICTION"
+            status = "WHITE LANE PREDICTION"
             status_color = (0, 165, 255)
-        elif self.line_detected:
-            status = "YELLOW DETECTED"
+        elif self.lane_available:
+            status = "WHITE LANE CENTER OK"
             status_color = (0, 255, 0)
         else:
-            status = "NO YELLOW LINE"
+            status = "NO WHITE LANES"
             status_color = (0, 0, 255)
 
         cv2.putText(
@@ -615,7 +822,7 @@ class AutoDrive:
             status,
             (20, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
+            0.85,
             status_color,
             2
         )
@@ -630,12 +837,12 @@ class AutoDrive:
             2
         )
 
-        if self.last_error is not None:
+        if self.last_center_error is not None:
             cv2.putText(
                 warped_debug,
-                f"LINE_X:{self.last_line_x:.1f} "
-                f"TARGET:{self.last_target_x:.1f} "
-                f"ERR:{self.last_error:.1f}",
+                f"L:{self.left_available} R:{self.right_available} "
+                f"CENTER:{self.last_center_x:.1f} "
+                f"TARGET:{self.last_target_x:.1f}",
                 (20, 110),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
@@ -645,9 +852,9 @@ class AutoDrive:
 
             cv2.putText(
                 warped_debug,
+                f"ERR:{self.last_center_error:.1f} "
                 f"HEAD:{self.last_heading_error:.1f} "
-                f"CTRL:{self.last_control_error:.1f} "
-                f"PIX:{self.last_pixel_count}",
+                f"CTRL:{self.last_control_error:.1f}",
                 (20, 140),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
@@ -659,18 +866,19 @@ class AutoDrive:
                 warped_debug,
                 f"GAIN:{self.last_dynamic_gain:.3f} "
                 f"SMOOTH:{self.last_dynamic_smoothing:.2f} "
-                f"PRED:{self.prediction_count}",
+                f"L_CNT:{self.last_left_count} R_CNT:{self.last_right_count}",
                 (20, 170),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.50,
                 (255, 255, 255),
                 2
             )
+
         else:
             cv2.putText(
                 warped_debug,
-                f"HOLD_ANGLE:{self.prev_angle:.2f} "
-                f"PRED:{self.prediction_count}",
+                f"HOLD:{self.hold_angle_count} "
+                f"PREV_ANGLE:{self.prev_angle:.2f}",
                 (20, 110),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.60,
@@ -678,7 +886,7 @@ class AutoDrive:
                 2
             )
 
-        # 마스크 표시용 전체 이미지 생성
+        # 마스크를 전체 크기로 복원
         mask_view = np.zeros((height, width), dtype=np.uint8)
 
         if self.last_mask is not None and self.last_roi_y1 is not None:
@@ -690,7 +898,6 @@ class AutoDrive:
 
         mask_color = cv2.cvtColor(mask_view, cv2.COLOR_GRAY2BGR)
 
-        # 4분할 디버그 화면
         view_w = 320
         view_h = 240
 
@@ -705,8 +912,33 @@ class AutoDrive:
         cv2.imshow(self.window_name, combined)
         cv2.waitKey(1)
 
+    def draw_fit_curve(self, image, fit, y_start, y_end, color):
+        if fit is None:
+            return
+
+        height, width = image.shape[:2]
+
+        points = []
+
+        for y in range(y_start, y_end, 10):
+            x = self.eval_poly(fit, y)
+
+            if 0 <= x < width:
+                points.append((int(x), int(y)))
+
+        if len(points) >= 2:
+            pts = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
+
+            cv2.polylines(
+                image,
+                [pts],
+                isClosed=False,
+                color=color,
+                thickness=4
+            )
+
     # =====================================================
-    # Utility
+    # Basic utility
     # =====================================================
 
     def clamp(self, value, min_value, max_value):
@@ -718,16 +950,16 @@ class AutoDrive:
         if self.log_count % 20 != 0:
             return
 
-        line_x_text = (
+        center_text = (
             "None"
-            if self.last_line_x is None
-            else f"{self.last_line_x:.1f}"
+            if self.last_center_x is None
+            else f"{self.last_center_x:.1f}"
         )
 
         err_text = (
             "None"
-            if self.last_error is None
-            else f"{self.last_error:.1f}"
+            if self.last_center_error is None
+            else f"{self.last_center_error:.1f}"
         )
 
         ctrl_text = (
@@ -736,17 +968,25 @@ class AutoDrive:
             else f"{self.last_control_error:.1f}"
         )
 
+        lane_width_text = (
+            "None"
+            if self.last_lane_width is None
+            else f"{self.last_lane_width:.1f}"
+        )
+
         self.log_info(
-            f"AUTO_DRIVE | "
-            f"detected:{self.line_detected} | "
-            f"prediction:{self.using_prediction} | "
+            f"AUTO_DRIVE WHITE | "
+            f"lane:{self.lane_available} | "
+            f"L:{self.left_available} | "
+            f"R:{self.right_available} | "
+            f"pred:{self.using_prediction} | "
             f"hold:{self.holding_angle} | "
-            f"line_x:{line_x_text} | "
+            f"center:{center_text} | "
             f"err:{err_text} | "
             f"ctrl:{ctrl_text} | "
+            f"width:{lane_width_text} | "
             f"gain:{self.last_dynamic_gain:.3f} | "
             f"smooth:{self.last_dynamic_smoothing:.2f} | "
-            f"pixels:{self.last_pixel_count} | "
             f"angle:{self.angle:.2f} | "
             f"speed:{self.speed:.2f}"
         )
