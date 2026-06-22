@@ -32,7 +32,7 @@ class AutoDrive:
         self.speed = 0.0
 
         # 속도는 +4만 사용
-        self.drive_speed = 4.0
+        self.drive_speed = 8.0
 
         self.max_angle = 100.0
 
