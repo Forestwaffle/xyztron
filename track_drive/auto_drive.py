@@ -36,7 +36,7 @@ class AutoDrive:
         self.speed = 0.0
 
         # 흰색 오른쪽 차선이 보일 때 속도
-        self.line_detected_speed = 16.0
+        self.line_detected_speed = 8.0
 
         # 흰색 차선이 안 보일 때 느린 직진 속도
         self.no_line_speed = 8.0
