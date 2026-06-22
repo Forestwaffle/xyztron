@@ -6,10 +6,25 @@ import numpy as np
 
 
 class AutoDrive:
+    """
+    흰색 차선 중앙 추종 AUTO_DRIVE.
+
+    동작:
+        1. 전방 카메라 이미지를 Bird's Eye View로 변환
+        2. 화면 아래 70% ROI 사용
+        3. 흰색 차선만 검출
+        4. 하단 histogram으로 왼쪽/오른쪽 차선 시작점 탐색
+        5. sliding window로 좌/우 차선 픽셀 추적
+        6. 좌/우 차선을 2차 곡선으로 피팅
+        7. 두 흰선 사이 중앙을 계산
+        8. 차량 중심이 차선 중앙으로 가도록 조향
+        9. 속도는 항상 +4.0
+    """
+
     def __init__(self, logger=None, show_debug=True):
         self.logger = logger
         self.show_debug = show_debug
-        self.window_name = "AUTO_DRIVE Lane Stable"
+        self.window_name = "AUTO_DRIVE Lane Only"
 
         # =====================================================
         # Drive parameters
@@ -17,41 +32,30 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
-        # 직선 최고 속도
-        # 더 빠르게 하고 싶으면 여기만 9.0, 10.0으로 올릴 것
-        self.drive_speed = 8.0
-
-        # 커브 / 예측 / 미검출 속도
-        self.medium_curve_speed = 6.0
-        self.sharp_curve_speed = 4.5
-        self.prediction_speed = 4.0
-        self.no_line_speed = 3.5
+        # 요청 반영: 속도는 +4만 사용
+        self.drive_speed = 4.0
 
         self.max_angle = 100.0
-
-        # 강제 조향 offset 제거
-        self.steering_offset = 0.0
 
         # =====================================================
         # ROI / control parameters
         # =====================================================
-        # 속도를 올렸으므로 더 위까지 봄
+        # 화면 아래 70% 사용
         self.roi_y_start_ratio = 0.30
 
-        # 너무 먼 위쪽은 불안정해서 0.66 기준
-        self.lookahead_y_ratio = 0.66
+        # 더 앞쪽 차선 기준
+        self.lookahead_y_ratio = 0.60
+
+        # 가까운 기준점
         self.near_y_ratio = 0.95
 
-        # 일단 중앙 기준으로 복귀
-        # 오른쪽으로 계속 붙으면 0.51~0.52
-        # 왼쪽으로 붙으면 0.48~0.49
         self.target_center_x_ratio = 0.50
 
         # 차선 진행 방향 보정
         self.heading_gain = 0.40
 
-        # 기존 주행 방향 유지
-        # 조향이 반대로 움직이면 1.0으로 변경
+        # 조향 방향 보정
+        # 차가 반대로 꺾이면 1.0으로 변경
         self.steering_sign = -1.0
 
         # =====================================================
@@ -65,33 +69,23 @@ class AutoDrive:
 
         self.dead_zone_px = 3.0
 
-        # 속도를 올렸으므로 조향 smoothing을 줄여 반응을 빠르게 함
-        self.near_smoothing_alpha = 0.30
-        self.far_smoothing_alpha = 0.05
+        self.near_smoothing_alpha = 0.45
+        self.far_smoothing_alpha = 0.10
 
         self.prev_angle = 0.0
 
         # =====================================================
         # White threshold
         # =====================================================
-        # ROI를 위로 넓혔으므로 노이즈 방지를 위해 흰색 조건 약간 강화
-        self.white_lower = np.array([0, 0, 165])
-        self.white_upper = np.array([180, 90, 255])
-        self.min_bgr_white = 145
+        self.white_lower = np.array([0, 0, 155])
+        self.white_upper = np.array([180, 95, 255])
+        self.min_bgr_white = 135
 
         self.min_total_white_pixels = 120
         self.min_side_pixels = 55
 
         # =====================================================
-        # Previous fit search
-        # =====================================================
-        # 매 프레임 histogram부터 새로 찾지 않고,
-        # 이전 차선 fit 주변을 먼저 검색
-        self.use_previous_fit_first = True
-        self.search_margin = 65
-
-        # =====================================================
-        # Sliding window fallback
+        # Sliding window parameters
         # =====================================================
         self.nwindows = 7
         self.window_margin = 70
@@ -104,44 +98,38 @@ class AutoDrive:
         self.last_left_fit = None
         self.last_right_fit = None
 
-        # 이전 fit을 더 믿어서 차선 곡선 튐 감소
-        self.fit_alpha = 0.60
+        self.fit_alpha = 0.40
 
         self.left_prediction_count = 0
         self.right_prediction_count = 0
-        self.max_side_prediction_frames = 6
+        self.max_side_prediction_frames = 8
 
-        # 한쪽 차선만 보일 때 차선 폭 예측값 축소
-        self.default_lane_width_ratio = 0.42
+        self.default_lane_width_ratio = 0.52
         self.estimated_lane_width_px = None
-
-        # 차선 폭 변화도 천천히 반영
-        self.lane_width_alpha = 0.90
+        self.lane_width_alpha = 0.75
 
         self.min_lane_width_ratio = 0.25
-        self.max_lane_width_ratio = 0.82
+        self.max_lane_width_ratio = 0.90
 
         self.last_good_center_x = None
-
-        # 빨간 중앙선 튐 제한
-        self.max_center_jump_px = 45.0
+        self.max_center_jump_px = 90.0
 
         # 둘 다 안 보일 때
         self.hold_angle_count = 0
-        self.max_hold_angle_frames = 5
-        self.hold_angle_decay = 0.65
+        self.max_hold_angle_frames = 6
+        self.hold_angle_decay = 0.70
 
         # =====================================================
         # State / debug data
         # =====================================================
         self.started = False
+        self.warned_no_image = False
 
         self.lane_available = False
         self.left_available = False
         self.right_available = False
         self.using_prediction = False
         self.holding_angle = False
-        self.search_mode = "NONE"
 
         self.last_left_x = None
         self.last_right_x = None
@@ -167,6 +155,9 @@ class AutoDrive:
     # =====================================================
 
     def start(self):
+        if self.started:
+            return
+
         self.started = True
 
     def stop(self):
@@ -188,7 +179,7 @@ class AutoDrive:
     def process(self, image):
         if image is None:
             self.angle = self.prev_angle
-            self.speed = self.no_line_speed
+            self.speed = self.drive_speed
             return self.angle, self.speed
 
         result = self.detect_white_lane_center(image)
@@ -199,7 +190,6 @@ class AutoDrive:
             self.right_available = False
             self.using_prediction = False
             self.holding_angle = True
-            self.search_mode = "NO_LINE"
 
             self.last_left_x = None
             self.last_right_x = None
@@ -219,7 +209,7 @@ class AutoDrive:
                 self.angle = self.prev_angle * self.hold_angle_decay
                 self.prev_angle = self.angle
 
-            self.speed = self.no_line_speed
+            self.speed = self.drive_speed
 
         else:
             (
@@ -234,8 +224,7 @@ class AutoDrive:
                 right_available,
                 using_prediction,
                 left_count,
-                right_count,
-                search_mode,
+                right_count
             ) = result
 
             self.hold_angle_count = 0
@@ -245,7 +234,6 @@ class AutoDrive:
             self.left_available = left_available
             self.right_available = right_available
             self.using_prediction = using_prediction
-            self.search_mode = search_mode
 
             self.last_left_x = left_x
             self.last_right_x = right_x
@@ -283,36 +271,18 @@ class AutoDrive:
             )
 
             self.angle = self.clamp(
-                smoothed_angle + self.steering_offset,
+                smoothed_angle,
                 -self.max_angle,
                 self.max_angle
             )
 
             self.prev_angle = self.angle
-            self.speed = self.select_speed()
+            self.speed = self.drive_speed
 
         if self.show_debug:
             self.show_debug_view()
 
-        return float(self.angle), float(self.speed)
-
-    # =====================================================
-    # Speed control
-    # =====================================================
-
-    def select_speed(self):
-        abs_angle = abs(self.angle)
-
-        if self.using_prediction:
-            return self.prediction_speed
-
-        if abs_angle >= 45.0:
-            return self.sharp_curve_speed
-
-        if abs_angle >= 25.0:
-            return self.medium_curve_speed
-
-        return self.drive_speed
+        return self.angle, self.speed
 
     # =====================================================
     # Dynamic response
@@ -415,47 +385,15 @@ class AutoDrive:
         self.last_windows = []
 
         ys_roi, xs = white_mask.nonzero()
-        full_ys = ys_roi + roi_y1
 
         if len(xs) < self.min_total_white_pixels:
             return self.try_prediction_only(height, width)
 
-        # 1순위: 이전 fit 주변 검색
-        if self.use_previous_fit_first and (
-            self.last_left_fit is not None or self.last_right_fit is not None
-        ):
-            left_fit, left_detected, left_count = self.fit_lane_near_previous(
-                xs,
-                full_ys,
-                side="left"
-            )
+        full_ys = ys_roi + roi_y1
 
-            right_fit, right_detected, right_count = self.fit_lane_near_previous(
-                xs,
-                full_ys,
-                side="right"
-            )
-
-            result = self.compute_lane_center_from_fits(
-                left_fit,
-                right_fit,
-                left_detected,
-                right_detected,
-                left_count,
-                right_count,
-                height,
-                width,
-                forced_prediction=False,
-                search_mode="PREV_FIT"
-            )
-
-            if result is not None:
-                return result
-
-        # 2순위: histogram + sliding window 재탐색
         left_base, right_base = self.find_lane_bases(white_mask, width)
 
-        left_fit, left_detected, left_count = self.fit_lane_with_sliding_window(
+        left_fit, left_current_detected, left_count = self.fit_lane_with_sliding_window(
             xs,
             ys_roi,
             full_ys,
@@ -466,7 +404,7 @@ class AutoDrive:
             width=width
         )
 
-        right_fit, right_detected, right_count = self.fit_lane_with_sliding_window(
+        right_fit, right_current_detected, right_count = self.fit_lane_with_sliding_window(
             xs,
             ys_roi,
             full_ys,
@@ -480,14 +418,12 @@ class AutoDrive:
         return self.compute_lane_center_from_fits(
             left_fit,
             right_fit,
-            left_detected,
-            right_detected,
+            left_current_detected,
+            right_current_detected,
             left_count,
             right_count,
             height,
-            width,
-            forced_prediction=False,
-            search_mode="SLIDING"
+            width
         )
 
     def create_white_mask(self, image):
@@ -515,29 +451,6 @@ class AutoDrive:
         )
 
         return white_mask
-
-    def fit_lane_near_previous(self, nonzerox, full_nonzeroy, side):
-        if side == "left":
-            previous_fit = self.last_left_fit
-        else:
-            previous_fit = self.last_right_fit
-
-        if previous_fit is None:
-            return None, False, 0
-
-        predicted_x = self.eval_poly_array(previous_fit, full_nonzeroy)
-
-        lane_mask = np.abs(nonzerox - predicted_x) < self.search_margin
-
-        lane_xs = nonzerox[lane_mask]
-        lane_ys = full_nonzeroy[lane_mask]
-
-        pixel_count = len(lane_xs)
-
-        if pixel_count < self.min_side_pixels:
-            return None, False, 0
-
-        return self.update_fit(side, lane_xs, lane_ys, pixel_count)
 
     def find_lane_bases(self, white_mask, width):
         roi_h = white_mask.shape[0]
@@ -623,9 +536,6 @@ class AutoDrive:
         lane_xs = nonzerox[lane_inds]
         lane_ys = full_nonzeroy[lane_inds]
 
-        return self.update_fit(side, lane_xs, lane_ys, pixel_count)
-
-    def update_fit(self, side, lane_xs, lane_ys, pixel_count):
         try:
             new_fit = np.polyfit(lane_ys, lane_xs, 2)
 
@@ -653,7 +563,7 @@ class AutoDrive:
                 self.last_right_fit = fit
                 self.right_prediction_count = 0
 
-            return fit, True, int(pixel_count)
+            return fit, True, pixel_count
 
         except Exception:
             return self.try_side_prediction(side)
@@ -678,8 +588,8 @@ class AutoDrive:
         return None, False, 0
 
     def try_prediction_only(self, height, width):
-        left_fit, left_detected, left_count = self.try_side_prediction("left")
-        right_fit, right_detected, right_count = self.try_side_prediction("right")
+        left_fit, left_current_detected, left_count = self.try_side_prediction("left")
+        right_fit, right_current_detected, right_count = self.try_side_prediction("right")
 
         if left_fit is None and right_fit is None:
             return None
@@ -687,14 +597,13 @@ class AutoDrive:
         return self.compute_lane_center_from_fits(
             left_fit,
             right_fit,
-            left_detected,
-            right_detected,
+            left_current_detected,
+            right_current_detected,
             left_count,
             right_count,
             height,
             width,
-            forced_prediction=True,
-            search_mode="PREDICT"
+            forced_prediction=True
         )
 
     def compute_lane_center_from_fits(
@@ -707,8 +616,7 @@ class AutoDrive:
         right_count,
         height,
         width,
-        forced_prediction=False,
-        search_mode="NONE"
+        forced_prediction=False
     ):
         lookahead_y = int(height * self.lookahead_y_ratio)
         near_y = int(height * self.near_y_ratio)
@@ -740,6 +648,8 @@ class AutoDrive:
         if not left_available and not right_available:
             return None
 
+        lane_width = None
+
         if left_available and right_available:
             lane_width = right_x - left_x
 
@@ -755,6 +665,7 @@ class AutoDrive:
                     left_available = False
                     left_x = None
                     left_x_near = None
+
             else:
                 if self.estimated_lane_width_px is None:
                     self.estimated_lane_width_px = lane_width
@@ -778,19 +689,13 @@ class AutoDrive:
             left_x_near = right_x_near - estimated_width
             left_available = True
 
-        if (
-            left_x is None
-            or right_x is None
-            or left_x_near is None
-            or right_x_near is None
-        ):
+        if left_x is None or right_x is None:
             return None
 
         lane_center = (left_x + right_x) / 2.0
         lane_center_near = (left_x_near + right_x_near) / 2.0
 
         if self.last_good_center_x is not None:
-            original_center = lane_center
             center_diff = lane_center - self.last_good_center_x
 
             if abs(center_diff) > self.max_center_jump_px:
@@ -798,9 +703,6 @@ class AutoDrive:
                     self.last_good_center_x
                     + np.sign(center_diff) * self.max_center_jump_px
                 )
-
-                center_shift = lane_center - original_center
-                lane_center_near = lane_center_near + center_shift
 
         self.last_good_center_x = lane_center
 
@@ -823,12 +725,11 @@ class AutoDrive:
             float(heading_error),
             float(left_x),
             float(right_x),
-            bool(left_available),
-            bool(right_available),
-            bool(using_prediction),
+            left_available,
+            right_available,
+            using_prediction,
             int(left_count),
-            int(right_count),
-            search_mode
+            int(right_count)
         )
 
     # =====================================================
@@ -838,11 +739,8 @@ class AutoDrive:
     def eval_poly(self, fit, y):
         return float(fit[0] * y * y + fit[1] * y + fit[2])
 
-    def eval_poly_array(self, fit, y_array):
-        return fit[0] * y_array * y_array + fit[1] * y_array + fit[2]
-
     def is_reasonable_x(self, x, width):
-        return -0.20 * width <= x <= 1.20 * width
+        return -0.25 * width <= x <= 1.25 * width
 
     def get_lane_width_estimate(self, width):
         if self.estimated_lane_width_px is not None:
@@ -865,8 +763,10 @@ class AutoDrive:
 
         lane_view = np.zeros((height, width, 3), dtype=np.uint8)
 
+        # 흰색 마스크만 표시
         if self.last_mask is not None and self.last_roi_y1 is not None:
             mask_h, mask_w = self.last_mask.shape[:2]
+
             mask_color = cv2.cvtColor(self.last_mask, cv2.COLOR_GRAY2BGR)
 
             lane_view[
@@ -877,6 +777,7 @@ class AutoDrive:
         roi_y1 = int(height * self.roi_y_start_ratio)
         lookahead_y = int(height * self.lookahead_y_ratio)
 
+        # sliding windows
         for win_x_low, win_y_low, win_x_high, win_y_high, side in self.last_windows:
             color = (255, 0, 0) if side == "left" else (0, 255, 0)
 
@@ -888,6 +789,7 @@ class AutoDrive:
                 1
             )
 
+        # fit curves
         self.draw_fit_curve(
             lane_view,
             self.last_left_fit,
@@ -904,6 +806,7 @@ class AutoDrive:
             color=(0, 255, 0)
         )
 
+        # 차량 중심선
         target_x = int(width * self.target_center_x_ratio)
 
         cv2.line(
@@ -914,6 +817,7 @@ class AutoDrive:
             2
         )
 
+        # 계산된 차선 중앙선
         if self.last_center_x is not None:
             cx = int(self.clamp(self.last_center_x, 0, width - 1))
 
@@ -933,6 +837,7 @@ class AutoDrive:
                 -1
             )
 
+        # left / right lookahead point
         if self.last_left_x is not None:
             lx = int(self.clamp(self.last_left_x, 0, width - 1))
             cv2.circle(
