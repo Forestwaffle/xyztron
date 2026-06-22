@@ -39,7 +39,7 @@ class AutoDrive:
         # 왼쪽으로 붙는 현상 보정용 조향 offset
         # 양수에서 오른쪽으로 가면 그대로 사용
         # 양수에서 더 왼쪽으로 가면 -4.0으로 변경
-        self.steering_offset = 4.0
+        self.steering_offset = 2.0
 
         # =====================================================
         # ROI / control parameters
