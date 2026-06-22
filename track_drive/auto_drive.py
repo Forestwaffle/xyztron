@@ -40,8 +40,8 @@ class AutoDrive:
         # =====================================================
         # ROI / control parameters
         # =====================================================
-        # 화면 아래 70% 사용
-        self.roi_y_start_ratio = 0.30
+        # 화면 아래 50% 사용
+        self.roi_y_start_ratio = 0.50
 
         # 더 앞쪽 차선 기준
         self.lookahead_y_ratio = 0.60
