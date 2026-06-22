@@ -11,10 +11,8 @@ class AutoDrive:
 
     동작:
         1. AUTO_DRIVE 시작 후 0.5초 동안 angle=10, speed=8
-        2. 0.5초 이후 계속 angle=0, speed=8
-
-    카메라 이미지는 주행 판단에 사용하지 않고,
-    show_debug=True일 때 디버그 화면 표시용으로만 사용한다.
+        2. 그 다음 6.0초 동안 angle=0, speed=8
+        3. 총 6.5초 이후 angle=0, speed=0
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -27,9 +25,14 @@ class AutoDrive:
 
         self.first_angle = 10.0
         self.first_speed = 8.0
+        self.first_duration = 0.5
+
         self.forward_angle = 0.0
         self.forward_speed = 8.0
-        self.first_duration = 0.5
+        self.forward_duration = 6.0
+
+        self.stop_angle = 0.0
+        self.stop_speed = 0.0
 
         self.started = False
         self.start_time = None
@@ -41,8 +44,10 @@ class AutoDrive:
 
         self.started = True
         self.start_time = time.time()
+
         self.log_info(
-            "AutoDrive started: 0.5s angle=10 speed=8, then angle=0 speed=8"
+            "AutoDrive started: 0.5s angle=10 speed=8, "
+            "then 6.0s angle=0 speed=8, then stop"
         )
 
     def process(self, image):
@@ -50,8 +55,9 @@ class AutoDrive:
         AUTO_DRIVE 메인 로직.
 
         Returns:
-            처음 0.5초: angle=10.0, speed=8.0
-            이후 계속: angle=0.0, speed=8.0
+            0.0 ~ 0.5초: angle=10.0, speed=8.0
+            0.5 ~ 6.5초: angle=0.0, speed=8.0
+            6.5초 이후: angle=0.0, speed=0.0
         """
         if not self.started:
             self.start()
@@ -62,10 +68,16 @@ class AutoDrive:
             self.angle = self.first_angle
             self.speed = self.first_speed
             mode_text = "FIRST TURN"
-        else:
+
+        elif elapsed_time < self.first_duration + self.forward_duration:
             self.angle = self.forward_angle
             self.speed = self.forward_speed
             mode_text = "GO STRAIGHT"
+
+        else:
+            self.angle = self.stop_angle
+            self.speed = self.stop_speed
+            mode_text = "STOP"
 
         if self.show_debug and image is not None:
             self.show_camera_debug(image, elapsed_time, mode_text)
