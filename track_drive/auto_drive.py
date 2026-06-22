@@ -29,7 +29,7 @@ class AutoDrive:
 
         self.forward_angle = 0.0
         self.forward_speed = 8.0
-        self.forward_duration = 4.0
+        self.forward_duration = 1.0
 
         self.stop_angle = 0.0
         self.stop_speed = 0.0
