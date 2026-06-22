@@ -9,16 +9,15 @@ class AutoDrive:
     """
     흰색 차선 중앙 추종 AUTO_DRIVE.
 
-    동작:
-        1. 전방 카메라 이미지를 Bird's Eye View로 변환
-        2. 화면 아래 70% ROI 사용
-        3. 흰색 차선만 검출
-        4. 하단 histogram으로 왼쪽/오른쪽 차선 시작점 탐색
-        5. sliding window로 좌/우 차선 픽셀 추적
-        6. 좌/우 차선을 2차 곡선으로 피팅
-        7. 두 흰선 사이 중앙을 계산
-        8. 차량 중심이 차선 중앙으로 가도록 조향
-        9. 속도는 항상 +4.0
+    변경점:
+        1. target_center_x_ratio = 0.47
+           - 차가 왼쪽으로 붙는 현상을 줄이기 위해 목표 중심을 약간 보정
+
+        2. steering_offset = 4.0
+           - 최종 조향각에 오른쪽 보정값 추가
+           - 차가 더 왼쪽으로 가면 -4.0으로 바꿀 것
+
+        3. 속도는 항상 +4.0
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -32,10 +31,15 @@ class AutoDrive:
         self.angle = 0.0
         self.speed = 0.0
 
-        # 요청 반영: 속도는 +4만 사용
+        # 속도는 +4만 사용
         self.drive_speed = 4.0
 
         self.max_angle = 100.0
+
+        # 왼쪽으로 붙는 현상 보정용 조향 offset
+        # 양수에서 오른쪽으로 가면 그대로 사용
+        # 양수에서 더 왼쪽으로 가면 -4.0으로 변경
+        self.steering_offset = 4.0
 
         # =====================================================
         # ROI / control parameters
@@ -49,7 +53,9 @@ class AutoDrive:
         # 가까운 기준점
         self.near_y_ratio = 0.95
 
-        self.target_center_x_ratio = 0.50
+        # 왼쪽으로 붙는 현상 보정
+        # 0.50보다 작게 하면 차량이 오른쪽으로 이동하는 효과
+        self.target_center_x_ratio = 0.47
 
         # 차선 진행 방향 보정
         self.heading_gain = 0.40
@@ -270,8 +276,11 @@ class AutoDrive:
                 + (1.0 - dynamic_smoothing) * raw_angle
             )
 
+            # =================================================
+            # 최종 조향 보정 적용
+            # =================================================
             self.angle = self.clamp(
-                smoothed_angle,
+                smoothed_angle + self.steering_offset,
                 -self.max_angle,
                 self.max_angle
             )
@@ -763,7 +772,6 @@ class AutoDrive:
 
         lane_view = np.zeros((height, width, 3), dtype=np.uint8)
 
-        # 흰색 마스크만 표시
         if self.last_mask is not None and self.last_roi_y1 is not None:
             mask_h, mask_w = self.last_mask.shape[:2]
 
@@ -777,7 +785,6 @@ class AutoDrive:
         roi_y1 = int(height * self.roi_y_start_ratio)
         lookahead_y = int(height * self.lookahead_y_ratio)
 
-        # sliding windows
         for win_x_low, win_y_low, win_x_high, win_y_high, side in self.last_windows:
             color = (255, 0, 0) if side == "left" else (0, 255, 0)
 
@@ -789,7 +796,6 @@ class AutoDrive:
                 1
             )
 
-        # fit curves
         self.draw_fit_curve(
             lane_view,
             self.last_left_fit,
@@ -806,7 +812,6 @@ class AutoDrive:
             color=(0, 255, 0)
         )
 
-        # 차량 중심선
         target_x = int(width * self.target_center_x_ratio)
 
         cv2.line(
@@ -817,7 +822,6 @@ class AutoDrive:
             2
         )
 
-        # 계산된 차선 중앙선
         if self.last_center_x is not None:
             cx = int(self.clamp(self.last_center_x, 0, width - 1))
 
@@ -837,7 +841,6 @@ class AutoDrive:
                 -1
             )
 
-        # left / right lookahead point
         if self.last_left_x is not None:
             lx = int(self.clamp(self.last_left_x, 0, width - 1))
             cv2.circle(
