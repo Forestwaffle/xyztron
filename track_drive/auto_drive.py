@@ -35,13 +35,13 @@ class AutoDrive:
         self.speed = 0.0
 
         # 노란선이 보일 때 속도
-        self.line_detected_speed = 6.0
+        self.line_detected_speed = 16.0
 
         # 점선이 끊겨서 예측으로 갈 때 속도
-        self.prediction_speed = 5.0
+        self.prediction_speed = 10.0
 
         # 노란선도 예측도 안 될 때, 마지막 각도 유지하면서 천천히 주행
-        self.no_line_speed = 4.0
+        self.no_line_speed = 5.0
 
         # 최대 조향각
         self.max_angle = 100.0
