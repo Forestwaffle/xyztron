@@ -181,11 +181,11 @@ class AutoDrive:
             self.last_line_angle_deg = None
             self.last_line_count = 0
 
-            self.angle = 0.0
+            self.angle = 20.0
             self.speed = self.no_line_speed
 
             # 차선이 안 보일 때는 이전 조향값 제거
-            self.prev_angle = 0.0
+            self.prev_angle = self.angle
 
         else:
             line_angle_deg, line_count, debug_data = result
