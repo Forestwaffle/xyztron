@@ -33,7 +33,7 @@ class AutoDrive:
         self.speed = 0.0
 
         # 요청 반영: 속도는 +4만 사용
-        self.drive_speed = 4.0
+        self.drive_speed = 6.0
 
         self.max_angle = 100.0
 
@@ -44,7 +44,7 @@ class AutoDrive:
         self.roi_y_start_ratio = 0.30
 
         # 더 앞쪽 차선 기준
-        self.lookahead_y_ratio = 0.60
+        self.lookahead_y_ratio = 0.50
 
         # 가까운 기준점
         self.near_y_ratio = 0.95
@@ -64,7 +64,7 @@ class AutoDrive:
         self.near_error_px = 10.0
         self.far_error_px = 70.0
 
-        self.min_center_gain = 0.22
+        self.min_center_gain = 0.15
         self.max_center_gain = 0.90
 
         self.dead_zone_px = 3.0
