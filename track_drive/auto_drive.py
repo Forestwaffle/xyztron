@@ -16,7 +16,8 @@ class YellowLineFollower:
         2. HSV 색상공간에서 노란색 마스크 추출
         3. 노란색 픽셀들로 직선 기울기 추정
         4. lookahead 지점의 노란선 x좌표 예측
-        5. 화면 중심과 노란선 위치 차이 + 선 기울기로 조향각 계산
+        5. 차량 중심과 노란선 위치 차이 + 선 기울기로 조향각 계산
+        6. 노란색이 안 보이면 마지막 조향각 유지
     """
 
     def __init__(self, logger=None, show_debug=True):
@@ -40,13 +41,23 @@ class YellowLineFollower:
         self.steer_sign = 1.0
 
         # =====================================================
+        # Vehicle center parameters
+        # =====================================================
+        # 화면 가로 기준 차량 중심.
+        # 카메라가 차량 중앙에 달려 있으면 0.50 유지.
+        self.vehicle_center_ratio = 0.50
+
+        # 카메라가 좌우로 치우쳐 있으면 보정.
+        # 예: 차량 중심이 화면보다 오른쪽이면 +20, 왼쪽이면 -20
+        self.vehicle_center_offset_px = 0
+
+        # =====================================================
         # ROI parameters
         # =====================================================
         # 화면 위쪽은 버리고 도로 하단만 사용
         self.roi_y_ratio = 0.50
 
         # ROI 안에서 어느 y 위치를 목표로 볼지
-        # 0.75면 ROI의 아래쪽 75% 지점
         self.lookahead_y_ratio = 0.75
 
         # =====================================================
@@ -57,15 +68,15 @@ class YellowLineFollower:
 
         self.min_yellow_area = 250
 
+        # 마지막 정상 조향값
         self.last_angle = 0.0
-        self.last_speed = 0.0
+        self.last_speed = self.speed
         self.warned_no_yellow = False
 
     def process(self, image):
         if image is None:
-            self.last_angle = 0.0
-            self.last_speed = 0.0
-            return 0.0, 0.0, "NO IMAGE"
+            # 이미지가 없으면 이전 각도 유지
+            return self.last_angle, self.speed, "NO IMAGE - KEEP ANGLE"
 
         height, width = image.shape[:2]
 
@@ -105,12 +116,20 @@ class YellowLineFollower:
 
         yellow_area = cv2.countNonZero(yellow_mask)
 
-        if yellow_area < self.min_yellow_area:
-            self.last_angle = 0.0
-            self.last_speed = 0.0
+        # =====================================================
+        # 3. 노란색이 안 보이면 마지막 각도 유지
+        # =====================================================
+        vehicle_center_x = int(
+            roi_width * self.vehicle_center_ratio
+        ) + self.vehicle_center_offset_px
 
+        vehicle_center_x = max(0, min(vehicle_center_x, roi_width - 1))
+
+        if yellow_area < self.min_yellow_area:
             if not self.warned_no_yellow:
-                self.log_warn("YellowLineFollower: yellow line not detected")
+                self.log_warn(
+                    "YellowLineFollower: yellow line not detected, keeping last angle"
+                )
                 self.warned_no_yellow = True
 
             if self.show_debug:
@@ -118,31 +137,43 @@ class YellowLineFollower:
                     image=image,
                     mask=yellow_mask,
                     roi_y1=roi_y1,
+                    vehicle_center_x=vehicle_center_x,
                     target_x=None,
                     target_y=None,
                     line_angle_deg=0.0,
                     error_x=0.0,
-                    mode_text="NO YELLOW - STOP"
+                    mode_text="NO YELLOW - KEEP ANGLE"
                 )
 
-            return 0.0, 0.0, "NO YELLOW - STOP"
+            return self.last_angle, self.speed, "NO YELLOW - KEEP ANGLE"
 
         self.warned_no_yellow = False
 
         # =====================================================
-        # 3. 노란색 픽셀 좌표 추출
+        # 4. 노란색 픽셀 좌표 추출
         # =====================================================
         ys, xs = np.where(yellow_mask > 0)
 
         if len(xs) < 20:
-            self.last_angle = 0.0
-            self.last_speed = 0.0
-            return 0.0, 0.0, "YELLOW TOO SMALL"
+            if self.show_debug:
+                self.show_debug_image(
+                    image=image,
+                    mask=yellow_mask,
+                    roi_y1=roi_y1,
+                    vehicle_center_x=vehicle_center_x,
+                    target_x=None,
+                    target_y=None,
+                    line_angle_deg=0.0,
+                    error_x=0.0,
+                    mode_text="YELLOW TOO SMALL - KEEP ANGLE"
+                )
+
+            return self.last_angle, self.speed, "YELLOW TOO SMALL - KEEP ANGLE"
 
         points = np.column_stack((xs, ys)).astype(np.float32)
 
         # =====================================================
-        # 4. 노란색 선의 기울기 추정
+        # 5. 노란색 선의 기울기 추정
         # =====================================================
         line = cv2.fitLine(
             points,
@@ -159,30 +190,38 @@ class YellowLineFollower:
         y0 = float(y0)
 
         if abs(vy) < 1e-5:
-            self.last_angle = 0.0
-            self.last_speed = 0.0
-            return 0.0, 0.0, "BAD LINE"
+            if self.show_debug:
+                self.show_debug_image(
+                    image=image,
+                    mask=yellow_mask,
+                    roi_y1=roi_y1,
+                    vehicle_center_x=vehicle_center_x,
+                    target_x=None,
+                    target_y=None,
+                    line_angle_deg=0.0,
+                    error_x=0.0,
+                    mode_text="BAD LINE - KEEP ANGLE"
+                )
+
+            return self.last_angle, self.speed, "BAD LINE - KEEP ANGLE"
 
         # =====================================================
-        # 5. lookahead 지점에서 노란선 위치 예측
+        # 6. lookahead 지점에서 노란선 위치 예측
         # =====================================================
         target_y = int(roi_height * self.lookahead_y_ratio)
         target_x = int(x0 + (target_y - y0) * vx / vy)
 
         target_x = max(0, min(target_x, roi_width - 1))
 
-        image_center_x = roi_width // 2
-
-        # 노란선이 화면 중심 기준 오른쪽이면 +
+        # 노란선이 차량 중심 기준 오른쪽이면 +
         # 왼쪽이면 -
-        error_x = target_x - image_center_x
+        error_x = target_x - vehicle_center_x
 
         # 수직선을 기준으로 한 기울기 각도
-        # 오른쪽으로 기울면 +, 왼쪽으로 기울면 -
         line_angle_deg = math.degrees(math.atan2(vx, vy))
 
         # =====================================================
-        # 6. 조향각 계산
+        # 7. 조향각 계산
         # =====================================================
         angle = (
             self.kp_position * error_x
@@ -204,6 +243,7 @@ class YellowLineFollower:
                 image=image,
                 mask=yellow_mask,
                 roi_y1=roi_y1,
+                vehicle_center_x=vehicle_center_x,
                 target_x=target_x,
                 target_y=target_y,
                 line_angle_deg=line_angle_deg,
@@ -218,6 +258,7 @@ class YellowLineFollower:
         image,
         mask,
         roi_y1,
+        vehicle_center_x,
         target_x,
         target_y,
         line_angle_deg,
@@ -226,8 +267,6 @@ class YellowLineFollower:
     ):
         debug_frame = image.copy()
         height, width = debug_frame.shape[:2]
-
-        image_center_x = width // 2
 
         # ROI 영역 표시
         cv2.rectangle(
@@ -238,16 +277,26 @@ class YellowLineFollower:
             2
         )
 
-        # 화면 중심선
+        # 차량 중심선 표시
         cv2.line(
             debug_frame,
-            (image_center_x, roi_y1),
-            (image_center_x, height - 1),
+            (vehicle_center_x, roi_y1),
+            (vehicle_center_x, height - 1),
             (255, 255, 255),
             2
         )
 
-        # 목표점 표시
+        cv2.putText(
+            debug_frame,
+            "VEHICLE CENTER",
+            (vehicle_center_x + 8, roi_y1 + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2
+        )
+
+        # 노란색 목표점 표시
         if target_x is not None and target_y is not None:
             target_y_image = roi_y1 + target_y
 
@@ -261,7 +310,7 @@ class YellowLineFollower:
 
             cv2.line(
                 debug_frame,
-                (image_center_x, target_y_image),
+                (vehicle_center_x, target_y_image),
                 (target_x, target_y_image),
                 (0, 255, 255),
                 2
@@ -309,7 +358,7 @@ class YellowLineFollower:
 
         cv2.putText(
             debug_frame,
-            f"ANGLE: {self.last_angle:.1f}  SPEED: {self.last_speed:.1f}",
+            f"ANGLE: {self.last_angle:.1f}  SPEED: {self.speed:.1f}",
             (20, 180),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -323,7 +372,7 @@ class YellowLineFollower:
 
     def stop(self):
         self.last_angle = 0.0
-        self.last_speed = 0.0
+        self.last_speed = self.speed
 
         try:
             cv2.destroyWindow(self.window_name)
