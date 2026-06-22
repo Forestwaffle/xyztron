@@ -65,12 +65,12 @@ class AutoDrive:
         self.far_error_px = 70.0
 
         self.min_center_gain = 0.15
-        self.max_center_gain = 0.90
+        self.max_center_gain = 0.55
 
         self.dead_zone_px = 3.0
 
-        self.near_smoothing_alpha = 0.45
-        self.far_smoothing_alpha = 0.10
+        self.near_smoothing_alpha = 0.65
+        self.far_smoothing_alpha = 0.30
 
         self.prev_angle = 0.0
 
